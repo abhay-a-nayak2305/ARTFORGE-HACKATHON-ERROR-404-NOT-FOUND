@@ -41,14 +41,22 @@ async def rate_limit_middleware(request: Request, call_next):
         check_rate_limit(ip)
     return await call_next(request)
 
+# backend/app/api/middleware.py
+# Update register_middleware to be more permissive initially
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+import time
+from app.utils.logger import get_logger
+
 logger = get_logger(__name__)
 
 
 def register_middleware(app: FastAPI, allowed_origins: list[str]) -> None:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
+        allow_origins=["*"],      # open during deployment testing
+        allow_credentials=False,  # must be False when allow_origins=["*"]
         allow_methods=["*"],
         allow_headers=["*"],
     )
