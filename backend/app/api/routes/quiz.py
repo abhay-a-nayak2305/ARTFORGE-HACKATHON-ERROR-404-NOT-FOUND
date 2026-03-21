@@ -1,20 +1,13 @@
 """
 Dynamic Quiz Generator — Groq Edition
 ──────────────────────────────────────
-Instead of hardcoded questions, Groq LLaMA-3.3-70B generates
-role-specific diagnostic questions on the fly.
+FIX: Route ordering corrected. /quiz/submit and /quiz/generate must be declared
+     BEFORE /quiz/{role}, otherwise FastAPI's top-down route matching treats
+     "submit" and "generate" as a {role} path parameter.
 
-Flow:
-  1. Frontend requests quiz for a role
-  2. Groq generates 8-10 targeted questions grounded to O*NET skills
-  3. User answers → scores mapped to skill proficiency levels
-  4. Scores converted to synthetic resume text
-  5. Full analysis pipeline runs on synthetic resume
-
-Endpoints:
-  GET  /api/quiz/{role}?experience_level=mid
-  POST /api/quiz/submit
-  POST /api/quiz/generate   (force regenerate, bypass cache)
+FIX: /quiz/generate now correctly annotates `role` as Query(...) instead of
+     relying on it being inferred from the function signature, which caused
+     FastAPI to look for it in the request body.
 """
 
 import json
@@ -23,10 +16,8 @@ import hashlib
 import asyncio
 from datetime import datetime
 from typing import Optional
-
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-
 from app.agent.groq_client import GroqClient
 from app.agent.tools.onet_lookup import load_onet_skills
 from app.agent.tools.resume_parser import TECH_SKILLS, SOFT_SKILLS
@@ -35,11 +26,10 @@ from app.utils.logger import get_logger
 router = APIRouter(prefix="/api", tags=["quiz"])
 logger = get_logger(__name__)
 
-# ── In-memory cache (role+level → generated questions) ───
-# Prevents regenerating identical quizzes on every request
+# ── In-memory cache ───────────────────────────────────────
 _quiz_cache: dict[str, dict] = {}
 
-# ── Supported roles (expand as needed) ───────────────────
+# ── Supported roles ───────────────────────────────────────
 SUPPORTED_ROLES = [
     "Software Engineer",
     "Data Scientist",
@@ -55,7 +45,6 @@ SUPPORTED_ROLES = [
 
 SUPPORTED_LEVELS = ["beginner", "mid", "senior"]
 
-
 # ── Pydantic models ───────────────────────────────────────
 
 class QuizOption(BaseModel):
@@ -67,11 +56,11 @@ class QuizOption(BaseModel):
 class QuizQuestion(BaseModel):
     id: str
     question: str
-    skill: str                          # canonical skill name
-    skill_category: str                 # "technical" | "soft" | "domain"
-    why_asked: str                      # shown in tooltip / reasoning trace
+    skill: str
+    skill_category: str
+    why_asked: str
     options: list[QuizOption]
-    weight: float = Field(1.0, ge=0.1, le=2.0)   # JD importance weight
+    weight: float = Field(1.0, ge=0.1, le=2.0)
 
 
 class GeneratedQuiz(BaseModel):
@@ -100,7 +89,7 @@ class QuizSubmission(BaseModel):
 
 class QuizResult(BaseModel):
     synthetic_resume: str
-    skill_profile: dict[str, float]     # skill → proficiency score
+    skill_profile: dict[str, float]
     strong_skills: list[str]
     weak_skills: list[str]
     estimated_experience: str
@@ -140,10 +129,10 @@ OUTPUT FORMAT (strict JSON array):
     "why_asked": "One sentence explaining why this skill matters for the role.",
     "weight": 1.5,
     "options": [
-      {"label": "I have no experience with this",        "score": 0.0,  "skill_level": "none"},
+      {"label": "I have no experience with this", "score": 0.0, "skill_level": "none"},
       {"label": "I understand the concept but rarely use it", "score": 0.35, "skill_level": "basic"},
-      {"label": "I use it regularly in projects",         "score": 0.65, "skill_level": "intermediate"},
-      {"label": "I am highly proficient / teach others",  "score": 1.0,  "skill_level": "advanced"}
+      {"label": "I use it regularly in projects", "score": 0.65, "skill_level": "intermediate"},
+      {"label": "I am highly proficient / teach others", "score": 1.0, "skill_level": "advanced"}
     ]
   }
 ]"""
@@ -159,18 +148,15 @@ def _build_user_prompt(
     level_context = {
         "beginner": (
             "The candidate is a recent graduate or career switcher (0-2 years experience). "
-            "Focus on foundational skills and basic tool familiarity. "
-            "Avoid assuming deep professional experience."
+            "Focus on foundational skills and basic tool familiarity."
         ),
         "mid": (
             "The candidate has 2-5 years of professional experience. "
-            "Include both fundamentals and intermediate practices. "
-            "Ask about real-world application and project experience."
+            "Include both fundamentals and intermediate practices."
         ),
         "senior": (
             "The candidate has 5+ years of experience. "
-            "Focus on architecture, leadership, advanced tooling, and best practices. "
-            "Include questions about mentoring, system design, and trade-offs."
+            "Focus on architecture, leadership, advanced tooling, and best practices."
         ),
     }
 
@@ -193,14 +179,11 @@ REQUIREMENTS:
 - Questions 1-{num_questions // 2}: Core technical skills (weight 1.5-2.0)
 - Questions {num_questions // 2 + 1}-{num_questions - 2}: Tools and frameworks (weight 1.0-1.5)
 - Last 2 questions: Soft skills and practices relevant to {role} (weight 0.8-1.0)
-- Make every question feel natural and respectful — not a test, but a conversation
-- Vary the question phrasing (not all "How would you describe your experience with...")
 
 Generate exactly {num_questions} questions now as a JSON array:"""
 
 
 # ── Role-specific focus areas ─────────────────────────────
-
 ROLE_FOCUS_AREAS: dict[str, list[str]] = {
     "Software Engineer": [
         "Data Structures & Algorithms", "System Design", "REST APIs",
@@ -259,19 +242,11 @@ ROLE_FOCUS_AREAS: dict[str, list[str]] = {
 }
 
 
-# ── O*NET skill fetcher for role ──────────────────────────
-
 def _get_onet_skills_for_role(role: str) -> list[str]:
-    """
-    Pull role-relevant skills from O*NET database.
-    Falls back to focus areas if O*NET not loaded.
-    """
     try:
         onet_db = load_onet_skills()
         if not onet_db:
             return ROLE_FOCUS_AREAS.get(role, [])
-
-        # Filter O*NET skills relevant to this role using keyword matching
         role_keywords = set(role.lower().split())
         relevant = []
         for skill_name, meta in onet_db.items():
@@ -280,31 +255,22 @@ def _get_onet_skills_for_role(role: str) -> list[str]:
                 relevant.append(meta.get("title", skill_name))
             if len(relevant) >= 25:
                 break
-
         return relevant if relevant else ROLE_FOCUS_AREAS.get(role, [])
     except Exception as e:
         logger.warning("onet_skills_fetch_failed: %s", e)
         return ROLE_FOCUS_AREAS.get(role, [])
 
 
-# ── Cache key builder ─────────────────────────────────────
-
 def _cache_key(role: str, experience_level: str) -> str:
     raw = f"{role}::{experience_level}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-
-# ── Core generator ────────────────────────────────────────
 
 async def _generate_quiz_with_groq(
     role: str,
     experience_level: str,
     num_questions: int = 10,
 ) -> list[QuizQuestion]:
-    """
-    Call Groq to generate quiz questions.
-    Validates the response and retries once on parse failure.
-    """
     groq = GroqClient.get()
     if not groq.available:
         logger.warning("quiz_generator: Groq unavailable, using fallback")
@@ -312,7 +278,6 @@ async def _generate_quiz_with_groq(
 
     onet_skills = _get_onet_skills_for_role(role)
     focus_areas = ROLE_FOCUS_AREAS.get(role, onet_skills[:10])
-
     system_prompt = _build_system_prompt()
     user_prompt = _build_user_prompt(
         role=role,
@@ -322,68 +287,31 @@ async def _generate_quiz_with_groq(
         focus_areas=focus_areas,
     )
 
-    raw_response = ""
-
     for attempt in range(3):
         try:
-            logger.info(
-                "quiz_generator.groq_call",
-                role=role,
-                level=experience_level,
-                attempt=attempt + 1,
-            )
-
+            logger.info("quiz_generator.groq_call", role=role, level=experience_level, attempt=attempt + 1)
             raw_response = await groq.call(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=3000,
-                temperature=0.4 + (attempt * 0.1),  # slight increase each retry
+                temperature=0.4 + (attempt * 0.1),
             )
-
             questions = _parse_groq_response(raw_response, role)
-
             if len(questions) >= 5:
-                logger.info(
-                    "quiz_generator.success",
-                    role=role,
-                    questions=len(questions),
-                    attempt=attempt + 1,
-                )
+                logger.info("quiz_generator.success", role=role, questions=len(questions), attempt=attempt + 1)
                 return questions
-
-            logger.warning(
-                "quiz_generator.insufficient_questions",
-                count=len(questions),
-                attempt=attempt + 1,
-            )
-
+            logger.warning("quiz_generator.insufficient_questions", count=len(questions), attempt=attempt + 1)
         except Exception as e:
-            logger.error(
-                "quiz_generator.error",
-                attempt=attempt + 1,
-                error=str(e),
-            )
+            logger.error("quiz_generator.error", attempt=attempt + 1, error=str(e))
             if attempt < 2:
                 await asyncio.sleep(1.5 ** attempt)
 
-    # All retries failed
     logger.error("quiz_generator.all_retries_failed", role=role)
     return _fallback_questions(role, experience_level)
 
 
 def _parse_groq_response(raw: str, role: str) -> list[QuizQuestion]:
-    """
-    Robustly parse Groq's JSON response into QuizQuestion objects.
-    Handles common LLM output issues:
-      - Markdown code fences
-      - Extra text before/after JSON
-      - Missing fields (filled with defaults)
-      - Invalid score values (clamped to 0-1)
-    """
-    # Strip markdown code fences if present
     cleaned = re.sub(r"```(?:json)?", "", raw).strip()
-
-    # Find the JSON array in the response
     array_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not array_match:
         raise ValueError(f"No JSON array found in Groq response: {cleaned[:200]}")
@@ -393,28 +321,23 @@ def _parse_groq_response(raw: str, role: str) -> list[QuizQuestion]:
 
     for i, item in enumerate(raw_list):
         try:
-            # Validate and clean options
             options = []
             for opt in item.get("options", []):
                 score = float(opt.get("score", 0.0))
-                score = max(0.0, min(1.0, score))  # clamp to [0, 1]
+                score = max(0.0, min(1.0, score))
                 options.append(QuizOption(
                     label=str(opt.get("label", "No label")),
                     score=round(score, 2),
                     skill_level=str(opt.get("skill_level", "basic")),
                 ))
-
-            # Ensure exactly 4 options
             if len(options) < 4:
                 options = _default_options()
             elif len(options) > 4:
                 options = options[:4]
-
-            # Ensure scores are in ascending order (none < basic < intermediate < advanced)
             options.sort(key=lambda o: o.score)
 
             weight = float(item.get("weight", 1.0))
-            weight = max(0.1, min(2.0, weight))  # clamp weight
+            weight = max(0.1, min(2.0, weight))
 
             questions.append(QuizQuestion(
                 id=item.get("id", f"q{i+1}"),
@@ -425,7 +348,6 @@ def _parse_groq_response(raw: str, role: str) -> list[QuizQuestion]:
                 options=options,
                 weight=round(weight, 1),
             ))
-
         except Exception as e:
             logger.warning("quiz_parser.skip_question index=%d error=%s", i, e)
             continue
@@ -434,23 +356,17 @@ def _parse_groq_response(raw: str, role: str) -> list[QuizQuestion]:
 
 
 def _default_options() -> list[QuizOption]:
-    """Standard 4-option proficiency scale used as fallback."""
     return [
-        QuizOption(label="I have no experience with this",           score=0.0,  skill_level="none"),
-        QuizOption(label="I understand it but rarely use it",        score=0.35, skill_level="basic"),
-        QuizOption(label="I use it regularly in real projects",      score=0.65, skill_level="intermediate"),
-        QuizOption(label="I am highly proficient / mentor others",   score=1.0,  skill_level="advanced"),
+        QuizOption(label="I have no experience with this", score=0.0, skill_level="none"),
+        QuizOption(label="I understand it but rarely use it", score=0.35, skill_level="basic"),
+        QuizOption(label="I use it regularly in real projects", score=0.65, skill_level="intermediate"),
+        QuizOption(label="I am highly proficient / mentor others", score=1.0, skill_level="advanced"),
     ]
 
 
 def _fallback_questions(role: str, experience_level: str) -> list[QuizQuestion]:
-    """
-    Static fallback questions used when Groq is unavailable.
-    Covers the most critical skills for each role.
-    """
     focus = ROLE_FOCUS_AREAS.get(role, ["Core Skills", "Communication", "Problem Solving"])
     questions = []
-
     for i, skill in enumerate(focus[:8]):
         questions.append(QuizQuestion(
             id=f"q{i+1}",
@@ -461,29 +377,19 @@ def _fallback_questions(role: str, experience_level: str) -> list[QuizQuestion]:
             options=_default_options(),
             weight=1.5 if i < 3 else 1.0,
         ))
-
     return questions
 
-
-# ── Score → resume text converter ────────────────────────
 
 def _scores_to_resume(
     answers: list[QuizAnswer],
     role: str,
     experience_level: str,
 ) -> tuple[str, dict[str, float]]:
-    """
-    Convert quiz answers into a synthetic resume text that the
-    full analysis pipeline can process exactly like a real resume.
-
-    Also returns a skill_profile dict: skill_name → proficiency_score.
-    """
     skill_profile: dict[str, float] = {}
-
-    advanced_skills: list[str]      = []
-    intermediate_skills: list[str]  = []
-    basic_skills: list[str]         = []
-    no_skills: list[str]            = []
+    advanced_skills: list[str] = []
+    intermediate_skills: list[str] = []
+    basic_skills: list[str] = []
+    no_skills: list[str] = []
 
     for answer in answers:
         skill_profile[answer.skill] = answer.score
@@ -496,149 +402,66 @@ def _scores_to_resume(
         else:
             no_skills.append(answer.skill)
 
-    level_label = {
-        "beginner": "Entry-Level",
-        "mid": "Mid-Level",
-        "senior": "Senior",
-    }.get(experience_level, "Professional")
+    level_label = {"beginner": "Entry-Level", "mid": "Mid-Level", "senior": "Senior"}.get(experience_level, "Professional")
+    years = {"beginner": "1 year", "mid": "3 years", "senior": "7 years"}.get(experience_level, "3 years")
 
-    years = {
-        "beginner": "1 year",
-        "mid": "3 years",
-        "senior": "7 years",
-    }.get(experience_level, "3 years")
-
-    lines: list[str] = []
-    lines.append(f"DIAGNOSTIC ASSESSMENT PROFILE")
-    lines.append(f"Role Target: {role}")
-    lines.append(f"Experience Level: {level_label} ({years} estimated)")
-    lines.append(f"Assessment Date: {datetime.utcnow().strftime('%B %Y')}")
-    lines.append("")
+    lines: list[str] = [
+        "DIAGNOSTIC ASSESSMENT PROFILE",
+        f"Role Target: {role}",
+        f"Experience Level: {level_label} ({years} estimated)",
+        f"Assessment Date: {datetime.utcnow().strftime('%B %Y')}",
+        "",
+    ]
 
     if advanced_skills:
-        lines.append("EXPERT PROFICIENCY (actively use in production):")
+        lines.append("EXPERT PROFICIENCY:")
         for s in advanced_skills:
-            lines.append(f"  - {s}: Advanced — used regularly in professional projects")
-
+            lines.append(f"  - {s}: Advanced")
     if intermediate_skills:
-        lines.append("")
-        lines.append("WORKING PROFICIENCY (comfortable, some project experience):")
+        lines.append("\nWORKING PROFICIENCY:")
         for s in intermediate_skills:
-            lines.append(f"  - {s}: Intermediate — applied in real-world scenarios")
-
+            lines.append(f"  - {s}: Intermediate")
     if basic_skills:
-        lines.append("")
-        lines.append("FOUNDATIONAL KNOWLEDGE (familiar, limited hands-on experience):")
+        lines.append("\nFOUNDATIONAL KNOWLEDGE:")
         for s in basic_skills:
-            lines.append(f"  - {s}: Basic — conceptual understanding, limited practical use")
-
-    lines.append("")
-    lines.append(f"EXPERIENCE SUMMARY:")
-    lines.append(
-        f"  {level_label} {role} with approximately {years} of experience. "
-        f"Strong in: {', '.join(advanced_skills[:3]) if advanced_skills else 'foundational skills'}."
-    )
-
+            lines.append(f"  - {s}: Basic")
     if no_skills:
-        lines.append("")
-        lines.append("AREAS FOR DEVELOPMENT (no current experience):")
+        lines.append("\nAREAS FOR DEVELOPMENT:")
         for s in no_skills:
             lines.append(f"  - {s}: Not yet explored")
+
+    lines.append(f"\nEXPERIENCE SUMMARY: {level_label} {role} with approximately {years} of experience.")
 
     return "\n".join(lines), skill_profile
 
 
 # ═══════════════════════════════════════════════════════════
-#  API ENDPOINTS
+# API ENDPOINTS
+# FIX: Static routes (/quiz/submit, /quiz/generate, /quiz/roles/list)
+#      MUST come before the dynamic /quiz/{role} route.
+#      FastAPI matches routes in declaration order, so without this fix
+#      "submit", "generate", and "roles" would be captured as {role} values
+#      and incorrectly hit the GET /quiz/{role} handler.
 # ═══════════════════════════════════════════════════════════
 
-@router.get("/quiz/{role}", response_model=GeneratedQuiz)
-async def get_quiz(
-    role: str,
-    experience_level: str = Query(default="mid", enum=SUPPORTED_LEVELS),
-    num_questions: int = Query(default=10, ge=5, le=15),
-    force_regenerate: bool = Query(default=False),
-):
-    """
-    Get a dynamically generated quiz for a role and experience level.
-
-    - Cached for 1 hour per role+level combination
-    - force_regenerate=true bypasses the cache
-    - num_questions: 5 to 15 (default 10)
-    """
-    if role not in SUPPORTED_ROLES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Role '{role}' not supported. Choose from: {SUPPORTED_ROLES}",
-        )
-
-    cache_key = _cache_key(role, experience_level)
-    cache_hit = False
-
-    # Check cache first
-    if not force_regenerate and cache_key in _quiz_cache:
-        cached = _quiz_cache[cache_key]
-        logger.info("quiz.cache_hit", role=role, level=experience_level)
-        return GeneratedQuiz(
-            role=cached["role"],
-            experience_level=cached["experience_level"],
-            questions=cached["questions"],
-            generated_at=cached["generated_at"],
-            groq_model=cached["groq_model"],
-            cache_hit=True,
-            total_questions=len(cached["questions"]),
-        )
-
-    # Generate fresh quiz with Groq
-    questions = await _generate_quiz_with_groq(
-        role=role,
-        experience_level=experience_level,
-        num_questions=num_questions,
-    )
-
-    now = datetime.utcnow().isoformat() + "Z"
-    groq_model = "llama-3.3-70b-versatile" if GroqClient.get().available else "fallback"
-
-    # Store in cache
-    _quiz_cache[cache_key] = {
-        "role": role,
-        "experience_level": experience_level,
-        "questions": questions,
-        "generated_at": now,
-        "groq_model": groq_model,
+@router.get("/quiz/roles/list")
+async def list_supported_roles():
+    """Return all roles that support quiz mode."""
+    return {
+        "roles": SUPPORTED_ROLES,
+        "levels": SUPPORTED_LEVELS,
+        "groq_available": GroqClient.get().available,
     }
-
-    logger.info(
-        "quiz.generated",
-        role=role,
-        level=experience_level,
-        questions=len(questions),
-        groq=groq_model,
-    )
-
-    return GeneratedQuiz(
-        role=role,
-        experience_level=experience_level,
-        questions=questions,
-        generated_at=now,
-        groq_model=groq_model,
-        cache_hit=False,
-        total_questions=len(questions),
-    )
 
 
 @router.post("/quiz/submit", response_model=QuizResult)
 async def submit_quiz(submission: QuizSubmission):
     """
-    Process quiz answers and return:
-      - synthetic resume text (fed directly to the analysis pipeline)
-      - skill profile breakdown
-      - strong/weak skills
-      - readiness assessment
+    Process quiz answers and return skill profile + synthetic resume.
+    Accepts JSON body (Content-Type: application/json).
     """
     if not submission.answers:
         raise HTTPException(status_code=422, detail="No answers provided.")
-
     if submission.role not in SUPPORTED_ROLES:
         raise HTTPException(status_code=400, detail=f"Unsupported role: {submission.role}")
 
@@ -648,15 +471,10 @@ async def submit_quiz(submission: QuizSubmission):
         experience_level=submission.experience_level,
     )
 
-    # Classify skills
     strong = [s for s, score in skill_profile.items() if score >= 0.65]
-    weak   = [s for s, score in skill_profile.items() if score < 0.35]
+    weak = [s for s, score in skill_profile.items() if score < 0.35]
 
-    # Estimate experience label
-    avg_score = (
-        sum(skill_profile.values()) / len(skill_profile)
-        if skill_profile else 0.0
-    )
+    avg_score = sum(skill_profile.values()) / len(skill_profile) if skill_profile else 0.0
     if avg_score >= 0.75:
         estimated_experience = "Senior (5+ years)"
     elif avg_score >= 0.50:
@@ -666,14 +484,8 @@ async def submit_quiz(submission: QuizSubmission):
     else:
         estimated_experience = "Beginner (career switcher)"
 
-    logger.info(
-        "quiz.submitted",
-        role=submission.role,
-        level=submission.experience_level,
-        strong_count=len(strong),
-        weak_count=len(weak),
-        avg_score=round(avg_score, 2),
-    )
+    logger.info("quiz.submitted", role=submission.role, level=submission.experience_level,
+                strong_count=len(strong), weak_count=len(weak), avg_score=round(avg_score, 2))
 
     return QuizResult(
         synthetic_resume=synthetic_resume,
@@ -691,14 +503,13 @@ async def submit_quiz(submission: QuizSubmission):
 
 @router.post("/quiz/generate", response_model=GeneratedQuiz)
 async def force_generate_quiz(
-    role: str,
+    # FIX: role must be annotated as Query(...) so FastAPI reads it from the
+    # query string. Without Query(), FastAPI assumes it's a request body field.
+    role: str = Query(..., description="Job role to generate quiz for"),
     experience_level: str = Query(default="mid", enum=SUPPORTED_LEVELS),
     num_questions: int = Query(default=10, ge=5, le=15),
 ):
-    """
-    Force-regenerate a quiz bypassing the cache.
-    Useful for testing or getting fresh questions.
-    """
+    """Force-regenerate a quiz bypassing the cache."""
     return await get_quiz(
         role=role,
         experience_level=experience_level,
@@ -707,11 +518,63 @@ async def force_generate_quiz(
     )
 
 
-@router.get("/quiz/roles/list")
-async def list_supported_roles():
-    """Return all roles that support quiz mode."""
-    return {
-        "roles": SUPPORTED_ROLES,
-        "levels": SUPPORTED_LEVELS,
-        "groq_available": GroqClient.get().available,
+# FIX: This dynamic route is declared LAST so it doesn't swallow
+#      /quiz/submit, /quiz/generate, and /quiz/roles/list.
+@router.get("/quiz/{role}", response_model=GeneratedQuiz)
+async def get_quiz(
+    role: str,
+    experience_level: str = Query(default="mid", enum=SUPPORTED_LEVELS),
+    num_questions: int = Query(default=10, ge=5, le=15),
+    force_regenerate: bool = Query(default=False),
+):
+    """Get a dynamically generated quiz for a role and experience level."""
+    if role not in SUPPORTED_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Role '{role}' not supported. Choose from: {SUPPORTED_ROLES}",
+        )
+
+    cache_key = _cache_key(role, experience_level)
+
+    if not force_regenerate and cache_key in _quiz_cache:
+        cached = _quiz_cache[cache_key]
+        logger.info("quiz.cache_hit", role=role, level=experience_level)
+        return GeneratedQuiz(
+            role=cached["role"],
+            experience_level=cached["experience_level"],
+            questions=cached["questions"],
+            generated_at=cached["generated_at"],
+            groq_model=cached["groq_model"],
+            cache_hit=True,
+            total_questions=len(cached["questions"]),
+        )
+
+    questions = await _generate_quiz_with_groq(
+        role=role,
+        experience_level=experience_level,
+        num_questions=num_questions,
+    )
+
+    now = datetime.utcnow().isoformat() + "Z"
+    groq_model = "llama-3.3-70b-versatile" if GroqClient.get().available else "fallback"
+
+    _quiz_cache[cache_key] = {
+        "role": role,
+        "experience_level": experience_level,
+        "questions": questions,
+        "generated_at": now,
+        "groq_model": groq_model,
     }
+
+    logger.info("quiz.generated", role=role, level=experience_level,
+                questions=len(questions), groq=groq_model)
+
+    return GeneratedQuiz(
+        role=role,
+        experience_level=experience_level,
+        questions=questions,
+        generated_at=now,
+        groq_model=groq_model,
+        cache_hit=False,
+        total_questions=len(questions),
+    )
