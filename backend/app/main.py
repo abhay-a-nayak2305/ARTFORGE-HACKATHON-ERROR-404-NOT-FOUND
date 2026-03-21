@@ -65,12 +65,3 @@ app.include_router(analyze.router)
 app.include_router(chat.router)
 app.include_router(pathway.router)
 app.include_router(quiz.router)
-
-# Serve frontend
-frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
-if frontend_dir.exists():
-    app.mount(
-        "/",
-        StaticFiles(directory=str(frontend_dir), html=True),
-        name="frontend",
-    )
