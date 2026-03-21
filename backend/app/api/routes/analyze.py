@@ -21,6 +21,40 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 logger = get_logger(__name__)
 settings = get_settings()
 
+@router.post("/analyze/stream")
+async def analyze_stream(
+    role: Annotated[str, Form()],
+    experience_level: Annotated[str, Form()],
+    use_demo: Annotated[bool, Form()] = False,
+    resume_file: Optional[UploadFile] = File(None),
+    jd_file: Optional[UploadFile] = File(None),
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator)
+):
+    async def event_generator():
+        steps = [
+            ("BERT NER",          "Extracting skills from resume…"),
+            ("Groq LLM",          "Running LLM skill extraction…"),
+            ("Gap Computation",   "Computing cosine similarity…"),
+            ("O*NET Grounding",   "Verifying against O*NET…"),
+        ]
+
+        for i, (name, msg) in enumerate(steps):
+            yield f"data: {json.dumps({'step': i+1,'name':name,'message':msg})}\n\n"
+            await asyncio.sleep(0.1)
+
+        # Now call the real orchestrator
+        result = await orchestrator.run_analysis(
+            role=role,
+            experience_level=experience_level,
+            resume_file=resume_file,
+            jd_file=jd_file,
+            use_demo=use_demo
+        )
+
+        yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @router.post("/analyze")
 async def analyze(
@@ -123,36 +157,3 @@ async def export_report(
             headers={"Content-Disposition": f'attachment; filename="PathForge_{session_id[:8]}.json"'},
         )
 
-@router.post("/analyze/stream")
-async def analyze_stream(
-    role: Annotated[str, Form()],
-    experience_level: Annotated[str, Form()],
-    use_demo: Annotated[bool, Form()] = False,
-    resume_file: Optional[UploadFile] = File(None),
-    jd_file: Optional[UploadFile] = File(None),
-    orchestrator: AgentOrchestrator = Depends(get_orchestrator)
-):
-    async def event_generator():
-        steps = [
-            ("BERT NER",          "Extracting skills from resume…"),
-            ("Groq LLM",          "Running LLM skill extraction…"),
-            ("Gap Computation",   "Computing cosine similarity…"),
-            ("O*NET Grounding",   "Verifying against O*NET…"),
-        ]
-
-        for i, (name, msg) in enumerate(steps):
-            yield f"data: {json.dumps({'step': i+1,'name':name,'message':msg})}\n\n"
-            await asyncio.sleep(0.1)
-
-        # Now call the real orchestrator
-        result = await orchestrator.run_analysis(
-            role=role,
-            experience_level=experience_level,
-            resume_file=resume_file,
-            jd_file=jd_file,
-            use_demo=use_demo
-        )
-
-        yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
