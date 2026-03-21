@@ -18,12 +18,11 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = int(os.environ.get("PORT", 10000))
 
-    ALLOWED_ORIGINS: list[str] = [
+    ALLOWED_ORIGINS: list[] = [
         "http://localhost:3000",
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-        "null",
-        "*",  # will tighten this after frontend URL is known
+        "http://localhost:8000",
+        "http://localhost:5173",
+        "https://aionboardingpathforge.netlify.app",
     ]
 
     GROQ_API_KEY: str = ""
