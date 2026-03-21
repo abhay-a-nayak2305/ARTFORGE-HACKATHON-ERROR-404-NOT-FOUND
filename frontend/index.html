@@ -3017,9 +3017,15 @@
             ]);
             renderGraph(d, c); renderSkillGaps(d, c); renderRadar(d, c); renderTimeline(d, c); renderTrace(d, c);
             setTimeout(function () { renderPlanner(parseInt(document.getElementById('hrs-slider').value) || 3); }, 100);
-            completedModules = new Set();
-            setTimeout(function () { initChat(); }, 200);
-        }
+            setTimeout(function () {
+            if (ROLES[role] && ROLES[role].graphData) {
+                renderEvaluationDashboard(ROLES[role].graphData);
+            }
+        }, 200);
+
+        completedModules = new Set();
+        setTimeout(function () { initChat(); }, 200);
+    }
 
         /* ── RENDER STATS ── */
         function renderStats(items) {
@@ -4014,25 +4020,79 @@ tr:nth-child(even){background:rgba(255,255,255,.015)}
 
         // ── Merge real backend data into ROLES dict ───────────
         function _injectBackendData(data) {
-            const nodes = data.pathway_nodes.map(n => ({
-                id: n.id, t: n.node_type, x: n.x, y: n.y,
-                label: n.label, days: n.days, pri: n.priority,
-            }));
-            const edges = data.pathway_edges.map(e => [e.source, e.target]);
+    const nodes = data.pathway_nodes.map(n => ({
+        id: n.id, t: n.node_type, x: n.x, y: n.y,
+        label: n.label, days: n.days, pri: n.priority,
+    }));
+    const edges = data.pathway_edges.map(e => [e.source, e.target]);
 
-            ROLES[data.role] = {
-                ...ROLES[data.role],
-                color: ROLES[data.role]?.color || "#00e5b8",
-                nodes, edges,
-                known: data.known_skills,
-                partial: data.partial_skills,
-                gaps: data.gap_skills,
-                score: data.match_score,
-                saved: data.days_saved,
-                skills: data.jd_skills.map(s => s.name).slice(0, 10),
-                _raw: data,
-            };
-        }
+    ROLES[data.role] = {
+        ...ROLES[data.role],
+        color: ROLES[data.role]?.color || "#00e5b8",
+        nodes, edges,
+        known:   data.known_skills,
+        partial: data.partial_skills,
+        gaps:    data.gap_skills,
+        score:   data.match_score,
+        saved:   data.days_saved,
+        skills:  data.jd_skills.map(s => s.name).slice(0, 10),
+        _raw:    data,
+        // ── Store graph data from backend ──
+        graphData: data.graph_data || null,
+    };
+}
+
+        function renderEvaluationDashboard(graphData) {
+    if (!graphData || !graphData.labels || !graphData.labels.length) return;
+
+    const { labels, current_profile, target_role } = graphData;
+    const radarTab = document.getElementById("tab-radar");
+    if (!radarTab) return;
+
+    // Remove old eval card if re-running analysis
+    const old = document.getElementById("eval-dashboard-card");
+    if (old) old.remove();
+
+    const card = document.createElement("div");
+    card.id = "eval-dashboard-card";
+    card.className = "card";
+    card.style.marginTop = "13px";
+
+    const barRows = labels.map((label, i) => {
+        const cur = current_profile[i] || 0;
+        const tgt = target_role[i]    || 90;
+        const gap = Math.max(0, tgt - cur);
+        const curColor  = cur >= 70 ? "#00e5b8" : cur >= 40 ? "#e8ff47" : "#ff4fd8";
+
+        return `
+        <div style="margin-bottom:14px">
+          <div style="display:flex;justify-content:space-between;
+                      font-family:var(--m);font-size:.68rem;margin-bottom:6px">
+            <span style="color:var(--fg2);font-weight:600">${label}</span>
+            <span style="color:var(--fg3)"><span style="color:${curColor};font-weight:700">${cur}%</span> / ${tgt}%</span>
+          </div>
+          <div style="position:relative;height:7px;background:rgba(255,255,255,.06);border-radius:100px;overflow:hidden">
+            <div style="position:absolute;left:0;top:0;height:100%;width:${tgt}%;background:rgba(255,79,216,.35);border-radius:100px"></div>
+            <div style="position:absolute;left:0;top:0;height:100%;width:${cur}%;background:linear-gradient(90deg,${curColor},${curColor}cc);border-radius:100px;box-shadow:0 0 8px ${curColor}60;transition:width 1.2s ease"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-family:var(--m);font-size:.58rem;color:var(--fg3);margin-top:4px">
+            <span>Current level</span>
+            <span style="color:${gap > 0 ? '#ff4fd8' : '#00e5b8'}">${gap > 0 ? `Gap: ${gap}pts` : '✓ At target'}</span>
+          </div>
+        </div>`;
+    }).join("");
+
+    card.innerHTML = `
+    <div class="cl">Resume vs Role — Skill Evaluation</div>
+    <div style="display:flex;gap:18px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.08)">
+      <div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:#00e5b8"></div>Your Level</div>
+      <div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:rgba(255,79,216,.35)"></div>Target</div>
+    </div>
+    <div id="eval-bar-rows">${barRows}</div>`;
+
+    radarTab.appendChild(card);
+    setTimeout(() => { card.querySelectorAll("[style*='transition:width']").forEach(el => { el.style.width = el.style.width; }); }, 120);
+}
 
         // ── Override sendChat to call real backend ────────────
         async function sendChat() {
