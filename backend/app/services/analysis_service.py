@@ -1,13 +1,12 @@
 """
 Analysis Service
 ────────────────
-Thin service layer that sits between the API route and the agent
-orchestrator. Handles:
-  - DB persistence of each AnalysisSession
-  - Async background saving (non-blocking)
-  - Session retrieval with DB fallback
+FIX: fetch_from_db now wraps AnalysisResponse(**row.payload) in try/except.
+     If the DB has old rows stored before new fields were added to the schema
+     (e.g. graph_data), Pydantic v2 raises ValidationError. Now returns None
+     gracefully so the caller treats it as a cache miss and reruns analysis.
 """
-import json
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -21,6 +20,7 @@ logger = get_logger(__name__)
 
 
 class AnalysisService:
+
     def __init__(self, orchestrator: AgentOrchestrator):
         self._orchestrator = orchestrator
 
@@ -33,10 +33,6 @@ class AnalysisService:
         used_demo: bool,
         db: AsyncSession,
     ) -> AnalysisResponse:
-        """
-        Run the full agent pipeline and persist the result.
-        Returns the complete AnalysisResponse.
-        """
         result = await self._orchestrator.run(
             resume_text=resume_text,
             jd_text=jd_text,
@@ -47,11 +43,11 @@ class AnalysisService:
         # Cache in memory for chat
         store_session(result.session_id, result)
 
-        # Persist to DB (non-blocking best-effort)
+        # Persist to DB (best-effort, non-blocking)
         try:
             await self._persist(result, used_demo, db)
         except Exception as e:
-            logger.warning("analysis_service.persist_failed", error=str(e))
+            logger.warning("analysis_service.persist_failed error=%s", str(e))
 
         return result
 
@@ -76,9 +72,8 @@ class AnalysisService:
         db.add(record)
         await db.commit()
         logger.info(
-            "analysis_service.persisted",
-            session_id=result.session_id,
-            role=result.role,
+            "analysis_service.persisted session_id=%s role=%s",
+            result.session_id, result.role,
         )
 
     async def fetch_from_db(
@@ -96,6 +91,16 @@ class AnalysisService:
         if row is None:
             return None
 
-        result = AnalysisResponse(**row.payload)
-        store_session(session_id, result)
-        return result
+        # FIX: wrap in try/except — old DB rows may be missing new schema fields
+        # (e.g. graph_data added later), which causes Pydantic ValidationError.
+        # Returning None causes the caller to treat it as a cache miss.
+        try:
+            result = AnalysisResponse(**row.payload)
+            store_session(session_id, result)
+            return result
+        except Exception as e:
+            logger.warning(
+                "analysis_service.fetch_schema_mismatch session_id=%s error=%s",
+                session_id, str(e),
+            )
+            return None
