@@ -6,6 +6,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# FIX: WORKDIR is /app. The render.yaml sets dockerContext: ./backend,
+# so Docker only sees the contents of the backend/ folder.
+# That means COPY . . copies backend/* into /app directly (no /app/backend subdir).
+# The old CMD did "cd /app/backend" which doesn't exist and crashes the server.
 WORKDIR /app
 
 # Install CPU-only PyTorch first (largest download, cached separately)
@@ -14,7 +18,6 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu
 
 # ── Create requirements.txt inline ───────────────────────
-# This completely avoids the COPY requirements.txt issue
 RUN cat > /app/requirements.txt << 'REQS'
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
@@ -38,21 +41,18 @@ aiofiles==23.2.1
 structlog==24.2.0
 REQS
 
-# Install all requirements
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Download spaCy model
 RUN python -m spacy download en_core_web_sm
 
-# Pre-download sentence transformer model
 RUN python -c "from sentence_transformers import SentenceTransformer; \
-               SentenceTransformer('all-MiniLM-L6-v2')"
+    SentenceTransformer('all-MiniLM-L6-v2')"
 
 # ── Copy application code ─────────────────────────────────
+# Since dockerContext is ./backend, this copies backend/* → /app/*
 COPY . .
 
-# ── Create data files inline ──────────────────────────────
-# Avoids the COPY data/ issue entirely
+# ── Create data directories ───────────────────────────────
 RUN mkdir -p /app/data /app/uploads
 
 RUN python3 << 'PYEOF'
@@ -105,8 +105,6 @@ onet_csv = """onet_code,title,category,description
 15-1257.06,Linux,Operating Systems,Linux operating system administration
 15-1258.00,Statistics,Mathematics,Statistical analysis and probability
 15-1258.01,A/B Testing,Analytics,A/B testing and experimentation
-15-1258.02,Data Wrangling,Data Science,Data cleaning and preparation
-15-1258.03,Tableau,Visualisation,Tableau data visualisation tool
 15-1259.00,Product Strategy,Product Management,Product strategy and vision
 15-1259.01,Agile,Methodologies,Agile project management methodology
 15-1259.02,Scrum,Methodologies,Scrum framework for agile development
@@ -128,40 +126,30 @@ with open("/app/data/onet_skills.csv", "w") as f:
 
 # ── course_catalog.json ───────────────────────────────────
 course_catalog = {
-    "Python":           {"provider": "Official Python Docs", "url": "https://docs.python.org/3/tutorial/",                          "duration_days": 4,  "level": "beginner"},
-    "JavaScript":       {"provider": "MDN Web Docs",         "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide", "duration_days": 4,  "level": "beginner"},
-    "TypeScript":       {"provider": "TypeScript Docs",      "url": "https://www.typescriptlang.org/docs/",                         "duration_days": 3,  "level": "intermediate"},
-    "React":            {"provider": "React Official Docs",  "url": "https://react.dev/learn",                                      "duration_days": 5,  "level": "intermediate"},
-    "Docker":           {"provider": "Docker Docs",          "url": "https://docs.docker.com/get-started/",                         "duration_days": 3,  "level": "intermediate"},
-    "Kubernetes":       {"provider": "Kubernetes Docs",      "url": "https://kubernetes.io/docs/tutorials/",                        "duration_days": 5,  "level": "advanced"},
-    "AWS":              {"provider": "AWS Skill Builder",    "url": "https://skillbuilder.aws/",                                    "duration_days": 6,  "level": "intermediate"},
-    "Machine Learning": {"provider": "fast.ai",              "url": "https://www.fast.ai/",                                         "duration_days": 7,  "level": "intermediate"},
-    "System Design":    {"provider": "System Design Primer", "url": "https://github.com/donnemartin/system-design-primer",          "duration_days": 5,  "level": "advanced"},
-    "PostgreSQL":       {"provider": "PostgreSQL Tutorial",  "url": "https://www.postgresql.org/docs/current/tutorial.html",        "duration_days": 3,  "level": "intermediate"},
-    "TensorFlow":       {"provider": "TensorFlow Tutorials", "url": "https://www.tensorflow.org/tutorials",                        "duration_days": 6,  "level": "advanced"},
-    "PyTorch":          {"provider": "PyTorch Tutorials",    "url": "https://pytorch.org/tutorials/",                              "duration_days": 6,  "level": "advanced"},
-    "REST APIs":        {"provider": "REST API Tutorial",    "url": "https://restfulapi.net/",                                      "duration_days": 2,  "level": "intermediate"},
-    "Git":              {"provider": "Pro Git Book",         "url": "https://git-scm.com/book/en/v2",                               "duration_days": 2,  "level": "beginner"},
-    "Terraform":        {"provider": "HashiCorp Learn",      "url": "https://developer.hashicorp.com/terraform/tutorials",          "duration_days": 4,  "level": "advanced"},
-    "CI/CD":            {"provider": "GitHub Actions Docs",  "url": "https://docs.github.com/en/actions",                          "duration_days": 3,  "level": "intermediate"},
-    "Agile":            {"provider": "Agile Alliance",       "url": "https://www.agilealliance.org/agile101/",                      "duration_days": 2,  "level": "beginner"},
-    "SQL":              {"provider": "SQLZoo",               "url": "https://sqlzoo.net/",                                          "duration_days": 3,  "level": "beginner"},
-    "Deep Learning":    {"provider": "deeplearning.ai",      "url": "https://www.deeplearning.ai/courses/",                        "duration_days": 8,  "level": "advanced"},
-    "Microservices":    {"provider": "Martin Fowler Guide",  "url": "https://martinfowler.com/microservices/",                     "duration_days": 4,  "level": "advanced"},
-    "Statistics":       {"provider": "Khan Academy",         "url": "https://www.khanacademy.org/math/statistics-probability",      "duration_days": 5,  "level": "beginner"},
-    "Pandas":           {"provider": "Pandas Docs",          "url": "https://pandas.pydata.org/docs/getting_started/",              "duration_days": 3,  "level": "beginner"},
-    "Linux":            {"provider": "Linux Journey",        "url": "https://linuxjourney.com/",                                    "duration_days": 4,  "level": "intermediate"},
-    "MongoDB":          {"provider": "MongoDB University",   "url": "https://learn.mongodb.com/",                                   "duration_days": 3,  "level": "intermediate"},
-    "Spark":            {"provider": "Apache Spark Docs",    "url": "https://spark.apache.org/docs/latest/",                       "duration_days": 5,  "level": "advanced"},
-    "MLOps":            {"provider": "MLOps Community",      "url": "https://mlops.community/",                                    "duration_days": 5,  "level": "advanced"},
-    "GraphQL":          {"provider": "GraphQL Docs",         "url": "https://graphql.org/learn/",                                   "duration_days": 3,  "level": "intermediate"},
-    "NLP":              {"provider": "Hugging Face Course",  "url": "https://huggingface.co/learn/nlp-course/",                    "duration_days": 6,  "level": "advanced"},
-    "Feature Engineering": {"provider": "Kaggle Learn",     "url": "https://www.kaggle.com/learn/feature-engineering",            "duration_days": 3,  "level": "intermediate"},
-    "A/B Testing":      {"provider": "Optimizely Academy",  "url": "https://www.optimizely.com/optimization-glossary/ab-testing/", "duration_days": 2,  "level": "intermediate"},
-    "Figma":            {"provider": "Figma Learn",          "url": "https://www.figma.com/resources/learn-design/",               "duration_days": 3,  "level": "beginner"},
-    "Scrum":            {"provider": "Scrum.org",            "url": "https://www.scrum.org/resources/what-scrum-module",           "duration_days": 2,  "level": "beginner"},
-    "OKRs":             {"provider": "WhatMatters.com",      "url": "https://www.whatmatters.com/resources/okr-crash-course",      "duration_days": 1,  "level": "beginner"},
-    "Product Strategy": {"provider": "Reforge",              "url": "https://www.reforge.com/",                                    "duration_days": 4,  "level": "advanced"},
+    "Python": {"provider": "Official Python Docs", "url": "https://docs.python.org/3/tutorial/", "duration_days": 4, "level": "beginner"},
+    "JavaScript": {"provider": "MDN Web Docs", "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide", "duration_days": 4, "level": "beginner"},
+    "TypeScript": {"provider": "TypeScript Docs", "url": "https://www.typescriptlang.org/docs/", "duration_days": 3, "level": "intermediate"},
+    "React": {"provider": "React Official Docs", "url": "https://react.dev/learn", "duration_days": 5, "level": "intermediate"},
+    "Docker": {"provider": "Docker Docs", "url": "https://docs.docker.com/get-started/", "duration_days": 3, "level": "intermediate"},
+    "Kubernetes": {"provider": "Kubernetes Docs", "url": "https://kubernetes.io/docs/tutorials/", "duration_days": 5, "level": "advanced"},
+    "AWS": {"provider": "AWS Skill Builder", "url": "https://skillbuilder.aws/", "duration_days": 6, "level": "intermediate"},
+    "Machine Learning": {"provider": "fast.ai", "url": "https://www.fast.ai/", "duration_days": 7, "level": "intermediate"},
+    "System Design": {"provider": "System Design Primer", "url": "https://github.com/donnemartin/system-design-primer", "duration_days": 5, "level": "advanced"},
+    "PostgreSQL": {"provider": "PostgreSQL Tutorial", "url": "https://www.postgresql.org/docs/current/tutorial.html", "duration_days": 3, "level": "intermediate"},
+    "TensorFlow": {"provider": "TensorFlow Tutorials", "url": "https://www.tensorflow.org/tutorials", "duration_days": 6, "level": "advanced"},
+    "PyTorch": {"provider": "PyTorch Tutorials", "url": "https://pytorch.org/tutorials/", "duration_days": 6, "level": "advanced"},
+    "REST APIs": {"provider": "REST API Tutorial", "url": "https://restfulapi.net/", "duration_days": 2, "level": "intermediate"},
+    "Git": {"provider": "Pro Git Book", "url": "https://git-scm.com/book/en/v2", "duration_days": 2, "level": "beginner"},
+    "Terraform": {"provider": "HashiCorp Learn", "url": "https://developer.hashicorp.com/terraform/tutorials", "duration_days": 4, "level": "advanced"},
+    "SQL": {"provider": "SQLZoo", "url": "https://sqlzoo.net/", "duration_days": 3, "level": "beginner"},
+    "Deep Learning": {"provider": "deeplearning.ai", "url": "https://www.deeplearning.ai/courses/", "duration_days": 8, "level": "advanced"},
+    "Agile": {"provider": "Agile Alliance", "url": "https://www.agilealliance.org/agile101/", "duration_days": 2, "level": "beginner"},
+    "Figma": {"provider": "Figma Learn", "url": "https://www.figma.com/resources/learn-design/", "duration_days": 3, "level": "beginner"},
+    "Statistics": {"provider": "Khan Academy", "url": "https://www.khanacademy.org/math/statistics-probability", "duration_days": 5, "level": "beginner"},
+    "Pandas": {"provider": "Pandas Docs", "url": "https://pandas.pydata.org/docs/getting_started/", "duration_days": 3, "level": "beginner"},
+    "Linux": {"provider": "Linux Journey", "url": "https://linuxjourney.com/", "duration_days": 4, "level": "intermediate"},
+    "MLOps": {"provider": "MLOps Community", "url": "https://mlops.community/", "duration_days": 5, "level": "advanced"},
+    "NLP": {"provider": "Hugging Face Course", "url": "https://huggingface.co/learn/nlp-course/", "duration_days": 6, "level": "advanced"},
 }
 
 with open("/app/data/course_catalog.json", "w") as f:
@@ -172,79 +160,45 @@ role_competencies = {
     "Software Engineer": {
         "onet_soc": "15-1252.00",
         "skills": ["Python","JavaScript","TypeScript","System Design","REST APIs",
-                   "Git","Docker","SQL","Testing","CI/CD","Code Review",
-                   "Microservices","Linux","AWS"],
+                   "Git","Docker","SQL","Testing","CI/CD","Code Review","Microservices","Linux","AWS"],
         "core_skills": ["Python","System Design","REST APIs","Git"],
         "nice_to_have": ["Kubernetes","Terraform","GraphQL"]
     },
     "Data Scientist": {
         "onet_soc": "15-2051.00",
-        "skills": ["Python","Machine Learning","Statistics","Deep Learning",
-                   "Pandas","NumPy","SQL","TensorFlow","PyTorch",
-                   "Feature Engineering","MLOps","A/B Testing","Spark","NLP"],
+        "skills": ["Python","Machine Learning","Statistics","Deep Learning","Pandas",
+                   "NumPy","SQL","TensorFlow","PyTorch","Feature Engineering","MLOps","A/B Testing","Spark","NLP"],
         "core_skills": ["Python","Machine Learning","Statistics","SQL"],
         "nice_to_have": ["Spark","Kubernetes","Tableau"]
     },
     "Product Manager": {
         "onet_soc": "11-2021.00",
-        "skills": ["Product Strategy","Agile","Scrum","Roadmapping",
-                   "Stakeholder Management","OKRs","User Research",
-                   "A/B Testing","JIRA","Communication","Leadership"],
+        "skills": ["Product Strategy","Agile","Scrum","Roadmapping","Stakeholder Management",
+                   "OKRs","User Research","A/B Testing","JIRA","Communication","Leadership"],
         "core_skills": ["Product Strategy","Agile","Stakeholder Management","OKRs"],
         "nice_to_have": ["SQL","Figma","Python"]
     },
     "DevOps Engineer": {
         "onet_soc": "15-1244.00",
-        "skills": ["Docker","Kubernetes","Terraform","Ansible","AWS",
-                   "CI/CD","GitHub Actions","Linux","Git","Python"],
+        "skills": ["Docker","Kubernetes","Terraform","Ansible","AWS","CI/CD","GitHub Actions","Linux","Git","Python"],
         "core_skills": ["Docker","Kubernetes","CI/CD","Linux"],
         "nice_to_have": ["GCP","Azure","Rust"]
     },
-    "Machine Learning Engineer": {
-        "onet_soc": "15-2051.01",
-        "skills": ["Python","PyTorch","TensorFlow","MLOps","Feature Engineering",
-                   "Deep Learning","Machine Learning","Docker","Kubernetes",
-                   "SQL","Spark","REST APIs","Git","Statistics"],
-        "core_skills": ["Python","PyTorch","MLOps","Deep Learning"],
-        "nice_to_have": ["Rust","Go","Spark"]
-    },
-    "Frontend Developer": {
-        "onet_soc": "15-1254.00",
-        "skills": ["JavaScript","TypeScript","React","Vue","Git",
-                   "REST APIs","Testing","Figma"],
-        "core_skills": ["JavaScript","React","Git"],
-        "nice_to_have": ["TypeScript","GraphQL","Docker"]
-    },
-    "Backend Developer": {
-        "onet_soc": "15-1252.01",
-        "skills": ["Python","REST APIs","PostgreSQL","MongoDB","Docker",
-                   "System Design","SQL","Git","Microservices","Testing","CI/CD"],
-        "core_skills": ["Python","REST APIs","SQL","Docker"],
-        "nice_to_have": ["Kubernetes","GraphQL"]
-    },
-    "Data Engineer": {
-        "onet_soc": "15-2041.00",
-        "skills": ["Python","SQL","Spark","AWS","Docker","Git",
-                   "MongoDB","PostgreSQL","MLOps"],
-        "core_skills": ["Python","SQL","Spark"],
-        "nice_to_have": ["Kubernetes","Terraform","Scala"]
-    }
 }
 
 with open("/app/data/role_competencies.json", "w") as f:
     json.dump(role_competencies, f, indent=2)
 
-print("Data files created successfully:")
-for f in os.listdir("/app/data"):
-    size = os.path.getsize(f"/app/data/{f}")
-    print(f"  /app/data/{f}  ({size} bytes)")
+print("Data files created successfully.")
 PYEOF
 
 EXPOSE 10000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
-    CMD curl -f http://localhost:10000/health || exit 1
+    CMD curl -f http://localhost:${PORT:-10000}/health || exit 1
 
-# Debug: show directory contents at startup, then launch
-# replace the current CMD with this:
-CMD ["sh", "-c", "cd /app/backend && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
+# FIX: The dockerContext in render.yaml is ./backend, so Docker copies
+# the contents of backend/ directly into /app (not into /app/backend).
+# The app module is therefore at /app/app/main.py → "app.main:app".
+# No "cd /app/backend" needed — just run uvicorn from /app directly.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
