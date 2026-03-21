@@ -247,4 +247,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
 
 # Debug: show directory contents at startup, then launch
 # replace the current CMD with this:
-CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
+CMD ["sh", "-c", "cd /app/backend && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
