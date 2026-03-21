@@ -11,6 +11,10 @@ from collections import defaultdict
 from time import time
 from fastapi import Request, HTTPException
 
+from fastapi import FastAPI
+
+app = FastAPI()
+
 # Simple in-memory rate limiter
 # Use Redis token bucket in production
 _request_counts: dict[str, list[float]] = defaultdict(list)
