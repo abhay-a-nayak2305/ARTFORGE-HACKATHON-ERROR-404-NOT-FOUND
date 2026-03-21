@@ -14,6 +14,7 @@ from app.utils.file_handler import (
     extract_text, get_demo_resume, get_demo_jd, validate_file_size,
 )
 from app.config import get_settings
+from app.agent.orchestrator import AgentOrchestrator
 from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/api", tags=["analysis"])
@@ -129,29 +130,29 @@ async def analyze_stream(
     use_demo: Annotated[bool, Form()] = False,
     resume_file: Optional[UploadFile] = File(None),
     jd_file: Optional[UploadFile] = File(None),
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator)
 ):
     async def event_generator():
         steps = [
             ("BERT NER",          "Extracting skills from resume…"),
             ("Groq LLM",          "Running LLM skill extraction…"),
-            ("Gap Computation",   "Computing cosine similarity matrix…"),
-            ("O*NET Grounding",   "Verifying against O*NET v28…"),
-            ("Graph Builder",     "Running adaptive BFS…"),
-            ("Hallucination Guard","Verifying all outputs…"),
+            ("Gap Computation",   "Computing cosine similarity…"),
+            ("O*NET Grounding",   "Verifying against O*NET…"),
         ]
+
         for i, (name, msg) in enumerate(steps):
-            pct = int(((i + 1) / len(steps)) * 100)
-            payload = json.dumps({
-                "step": i + 1,
-                "name": name,
-                "message": msg,
-                "percent": pct,
-            })
-            yield f"data: {payload}\n\n"
+            yield f"data: {json.dumps({'step': i+1,'name':name,'message':msg})}\n\n"
             await asyncio.sleep(0.1)
 
-        # Run actual analysis
-        result = await _orchestrator.run(...)
+        # Now call the real orchestrator
+        result = await orchestrator.run_analysis(
+            role=role,
+            experience_level=experience_level,
+            resume_file=resume_file,
+            jd_file=jd_file,
+            use_demo=use_demo
+        )
+
         yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
