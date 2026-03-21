@@ -2872,10 +2872,7 @@
     </footer>
 
     <script>
-        const API_BASE = window.location.hostname === "localhost" ||
-                 window.location.hostname === "127.0.0.1"
-    ? "http://localhost:8000/api"
-    : "https://pathforge-backend.onrender.com/api";
+        const API_BASE ="https://pathforge-backend.onrender.com/api";
         /* ── THREE.JS 3D ── */
         (function () {
             try {
@@ -3975,7 +3972,7 @@ tr:nth-child(even){background:rgba(255,255,255,.015)}
         //  Drop this into index.html to wire the UI to FastAPI
         // ═══════════════════════════════════════════════════
 
-        const API_BASE = "http://localhost:8000/api";
+        
         let _sessionId = null;
 
         // ── Override goAnalyze to call the real backend ───────
