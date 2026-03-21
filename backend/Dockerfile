@@ -245,7 +245,4 @@ EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
     CMD curl -f http://localhost:10000/health || exit 1
 
-CMD uvicorn app.main:app \
-    --host 0.0.0.0 \
-    --port ${PORT:-10000} \
-    --workers 1
+CMD ["sh", "-c", "cd /app && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
