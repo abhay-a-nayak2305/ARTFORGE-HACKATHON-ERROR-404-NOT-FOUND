@@ -1,21 +1,22 @@
 """
 Groq LLM Client
 ───────────────
-Wraps the Groq API (llama-3.3-70b-versatile) for:
-  1. Enhanced skill extraction from free-text
-  2. Context-aware chat responses grounded to the pathway
-  3. Reasoning trace enrichment
-
-All prompts are strictly grounded — the system prompt
-forbids the model from inventing skills not present in
-the source documents or O*NET catalog.
-
-Uses groq-python SDK (pip install groq).
-Async-compatible via asyncio.to_thread for the sync SDK.
+FIXES:
+1. _call_sync was never defined — every Groq call crashed with AttributeError.
+2. call_with_retry was a dangling function outside the class body.
+3. RateLimitError / APITimeoutError don't exist in groq==0.9.0 — replaced
+   with generic Exception + response status code checking.
+4. self._settings didn't exist — was referencing module-level `settings`.
+5. Duplicate mid-file imports removed; all imports are now at the top.
 """
+
 import asyncio
+import json
+import re
 import time
+import logging
 from typing import Optional
+
 from groq import Groq
 from app.config import get_settings
 from app.utils.logger import get_logger
@@ -23,10 +24,10 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Model to use — change to "llama-3.1-8b-instant" for faster/cheaper
 GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_FALLBACK_MODEL = "llama-3.1-8b-instant"
 MAX_TOKENS = 1024
-TEMPERATURE = 0.1   # low temp = deterministic, grounded outputs
+TEMPERATURE = 0.1
 
 
 class GroqClient:
@@ -35,6 +36,7 @@ class GroqClient:
     Call GroqClient.get() to retrieve the shared instance.
     Falls back gracefully if GROQ_API_KEY is not set.
     """
+
     _instance: Optional["GroqClient"] = None
     _client: Optional[Groq] = None
     _available: bool = False
@@ -47,7 +49,6 @@ class GroqClient:
             return
         try:
             self._client = Groq(api_key=key)
-            # Quick connectivity check
             self._available = True
             logger.info("groq_client: Groq SDK initialised (model=%s)", GROQ_MODEL)
         except Exception as e:
@@ -65,64 +66,39 @@ class GroqClient:
         return self._available
 
     # ──────────────────────────────────────────────────────
-    #  LOW-LEVEL CALL
+    # LOW-LEVEL SYNC CALL (runs in thread pool via asyncio.to_thread)
     # ──────────────────────────────────────────────────────
-    # backend/app/agent/groq_client.py — replace _call_sync with this
 
-import asyncio
-from groq import RateLimitError, APITimeoutError
+    def _call_sync(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = MAX_TOKENS,
+        temperature: float = TEMPERATURE,
+        model: str = GROQ_MODEL,
+    ) -> str:
+        """
+        Synchronous Groq API call. Always called via asyncio.to_thread
+        so it never blocks the event loop.
+        FIX: This method was completely missing in the original file,
+        causing AttributeError on every single Groq call.
+        """
+        if not self._client:
+            return ""
+        result = self._client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return result.choices[0].message.content or ""
 
-async def call_with_retry(
-    self,
-    system_prompt: str,
-    user_prompt: str,
-    max_tokens: int = MAX_TOKENS,
-    temperature: float = TEMPERATURE,
-    retries: int = 3,
-    timeout: float = 15.0,
-) -> str:
-    """
-    Call Groq with automatic retry on rate limit or timeout.
-    Falls back to the faster model on second retry.
-    """
-    for attempt in range(retries):
-        try:
-            model = (
-                self._settings.GROQ_FALLBACK_MODEL
-                if attempt > 0
-                else GROQ_MODEL
-            )
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._client.chat.completions.create,
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                ),
-                timeout=timeout,
-            )
-            return result.choices[0].message.content or ""
-
-        except asyncio.TimeoutError:
-            logger.warning("groq.timeout attempt=%d", attempt + 1)
-            if attempt == retries - 1:
-                raise
-
-        except RateLimitError:
-            wait = 2 ** attempt  # exponential backoff: 1s, 2s, 4s
-            logger.warning("groq.rate_limit wait=%ds", wait)
-            await asyncio.sleep(wait)
-
-        except Exception as e:
-            logger.error("groq.error attempt=%d error=%s", attempt + 1, e)
-            if attempt == retries - 1:
-                raise
-
-    return ""
+    # ──────────────────────────────────────────────────────
+    # ASYNC CALL WITH RETRY + FALLBACK MODEL
+    # ──────────────────────────────────────────────────────
 
     async def call(
         self,
@@ -130,14 +106,78 @@ async def call_with_retry(
         user_prompt: str,
         max_tokens: int = MAX_TOKENS,
         temperature: float = TEMPERATURE,
+        retries: int = 3,
+        timeout: float = 30.0,
     ) -> str:
-        """Async wrapper — runs the sync SDK call in a thread pool."""
-        return await asyncio.to_thread(
-            self._call_sync, system_prompt, user_prompt, max_tokens, temperature
-        )
+        """
+        Async Groq call with automatic retry and fallback model.
+
+        FIX: The original call() delegated to self._call_sync which didn't
+        exist. The original call_with_retry() was a dangling module-level
+        function (not a method), referenced self._settings (doesn't exist),
+        and imported RateLimitError/APITimeoutError which don't exist in
+        groq==0.9.0. All of that is replaced here cleanly.
+
+        Retry strategy:
+          - Attempt 1: primary model (llama-3.3-70b-versatile), full timeout
+          - Attempt 2+: fallback model (llama-3.1-8b-instant), shorter timeout
+          - Exponential backoff between retries: 1s, 2s, 4s
+        """
+        if not self._available or not self._client:
+            return ""
+
+        for attempt in range(retries):
+            # Switch to faster/cheaper fallback model after first failure
+            model = GROQ_MODEL if attempt == 0 else GROQ_FALLBACK_MODEL
+            # Reduce timeout on retries to fail faster
+            attempt_timeout = timeout if attempt == 0 else timeout * 0.6
+
+            try:
+                logger.info(
+                    "groq.call attempt=%d model=%s max_tokens=%d",
+                    attempt + 1, model, max_tokens,
+                )
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._call_sync,
+                        system_prompt,
+                        user_prompt,
+                        max_tokens,
+                        temperature,
+                        model,
+                    ),
+                    timeout=attempt_timeout,
+                )
+                return result
+
+            except asyncio.TimeoutError:
+                logger.warning("groq.timeout attempt=%d timeout=%.1fs", attempt + 1, attempt_timeout)
+                if attempt == retries - 1:
+                    logger.error("groq.all_retries_timed_out")
+                    return ""
+
+            except Exception as e:
+                err_str = str(e).lower()
+                # groq==0.9.0 surfaces rate limit as an HTTP exception with
+                # "rate_limit" in the message — catch generically
+                if "rate_limit" in err_str or "429" in err_str:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning("groq.rate_limit wait=%ds attempt=%d", wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                elif "401" in err_str or "invalid_api_key" in err_str:
+                    logger.error("groq.invalid_api_key — check GROQ_API_KEY env var on Render")
+                    self._available = False
+                    return ""
+                else:
+                    logger.error("groq.error attempt=%d error=%s", attempt + 1, e)
+                    if attempt == retries - 1:
+                        return ""
+                    await asyncio.sleep(1.5 ** attempt)
+
+        return ""
 
     # ──────────────────────────────────────────────────────
-    #  HIGH-LEVEL METHODS
+    # HIGH-LEVEL METHODS
     # ──────────────────────────────────────────────────────
 
     async def extract_skills_from_text(
@@ -147,10 +187,7 @@ async def call_with_retry(
         known_skills: Optional[list[str]] = None,
     ) -> list[str]:
         """
-        Ask Groq to extract a flat list of technical and soft skills
-        from the given text. Returns only skills verifiable in the text.
-
-        Falls back to empty list if Groq is unavailable.
+        Extract skills from free text. Returns empty list if Groq unavailable.
         """
         if not self._available:
             return []
@@ -178,8 +215,6 @@ async def call_with_retry(
 
         try:
             raw = await self.call(system, user, max_tokens=512, temperature=0.05)
-            # Parse JSON array from response
-            import json, re
             match = re.search(r'\[.*?\]', raw, re.DOTALL)
             if match:
                 skills = json.loads(match.group(0))
@@ -198,10 +233,7 @@ async def call_with_retry(
         experience_level: str,
     ) -> dict:
         """
-        Ask Groq to provide a structured, human-readable analysis
-        of the skill gap with priority explanations and learning tips.
-
-        Returns a dict with keys: summary, priority_rationale, quick_wins, long_term
+        Return structured gap analysis with priority explanations.
         """
         if not self._available:
             return {
@@ -232,14 +264,18 @@ async def call_with_retry(
 
         try:
             raw = await self.call(system, user, max_tokens=600, temperature=0.15)
-            import json, re
             match = re.search(r'\{.*?\}', raw, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
             return {"summary": raw[:300], "priority_rationale": "", "quick_wins": [], "long_term": []}
         except Exception as e:
             logger.warning("groq_client.enhance_gap_failed: %s", e)
-            return {"summary": f"{len(gaps)} gaps detected for {role}.", "priority_rationale": "", "quick_wins": [], "long_term": []}
+            return {
+                "summary": f"{len(gaps)} gaps detected for {role}.",
+                "priority_rationale": "",
+                "quick_wins": [],
+                "long_term": [],
+            }
 
     async def chat_response(
         self,
@@ -249,10 +285,6 @@ async def call_with_retry(
     ) -> str:
         """
         Generate a grounded chat response about the user's specific pathway.
-        The system prompt injects the full pathway context so the model
-        cannot hallucinate — it only has access to what's in the context.
-
-        Returns the reply string.
         """
         if not self._available:
             return ""
@@ -266,7 +298,6 @@ async def call_with_retry(
             f"Skill Gaps: {', '.join(pathway_context.get('gap_skills', [])[:8])}\n"
             f"Partial Skills: {', '.join(pathway_context.get('partial_skills', [])[:6])}\n"
             f"Pathway Modules: {', '.join(pathway_context.get('module_names', []))}\n"
-            f"Hallucination Violations: {pathway_context.get('violations', 0)}\n"
             f"AI Confidence: {pathway_context.get('confidence', 94.2)}%"
         )
 
@@ -283,7 +314,7 @@ async def call_with_retry(
             f"CANDIDATE PATHWAY CONTEXT:\n{context_str}"
         )
 
-        # Build message history (last 6 turns for context window efficiency)
+        # Build full message list including history (last 6 turns)
         messages = [{"role": "system", "content": system}]
         for turn in chat_history[-6:]:
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -294,16 +325,22 @@ async def call_with_retry(
 
         try:
             t0 = time.time()
-            completion = await asyncio.to_thread(
-                self._client.chat.completions.create,
-                model=GROQ_MODEL,
-                messages=messages,
-                max_tokens=256,
-                temperature=0.2,
+            # Chat needs the full messages list, so call _call_sync directly
+            # with a custom messages param via to_thread
+            completion = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: self._client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=256,
+                        temperature=0.2,
+                    )
+                ),
+                timeout=20.0,
             )
             elapsed = int((time.time() - t0) * 1000)
             reply = completion.choices[0].message.content or ""
-            logger.info("groq_client.chat", elapsed_ms=elapsed)
+            logger.info("groq_client.chat elapsed_ms=%d", elapsed)
             return reply.strip()
         except Exception as e:
             logger.warning("groq_client.chat_failed: %s", e)
@@ -317,12 +354,11 @@ async def call_with_retry(
     ) -> list[str]:
         """
         Generate 3 specific, actionable learning tips for a skill module.
-        Used to enrich node inspector popups.
         """
         if not self._available:
             return [
                 f"Focus on hands-on projects for {skill_name}.",
-                f"Review official documentation first.",
+                "Review official documentation first.",
                 f"Allocate {days_allocated} focused days with daily practice.",
             ]
 
@@ -336,12 +372,11 @@ async def call_with_retry(
             f"Skill: {skill_name}\n"
             f"Target Role: {role}\n"
             f"Time Available: {days_allocated} days\n"
-            f"Give 3 specific, actionable tips."
+            "Give 3 specific, actionable tips."
         )
 
         try:
             raw = await self.call(system, user, max_tokens=200, temperature=0.3)
-            import json, re
             match = re.search(r'\[.*?\]', raw, re.DOTALL)
             if match:
                 tips = json.loads(match.group(0))
