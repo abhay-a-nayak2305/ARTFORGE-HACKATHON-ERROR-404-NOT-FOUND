@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import time
 from app.utils.logger import get_logger
 # backend/app/api/middleware.py  — add rate limiting
-
+from app.main import app
 from collections import defaultdict
 from time import time
 from fastapi import Request, HTTPException
