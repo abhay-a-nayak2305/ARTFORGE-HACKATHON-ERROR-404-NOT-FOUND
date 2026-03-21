@@ -113,5 +113,3 @@ All endpoints require `Content-Type: multipart/form-data` for analysis endpoints
 
 ---
 
-## License
-[Add your license choice here, e.g., MIT License.]
