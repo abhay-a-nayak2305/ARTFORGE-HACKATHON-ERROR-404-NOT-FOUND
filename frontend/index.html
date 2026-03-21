@@ -4113,8 +4113,8 @@ tr:nth-child(even){background:rgba(255,255,255,.015)}
 
         // frontend — connect to SSE stream
         async function goAnalyze() {
-    const role = document.getElementById('role').value;
-    const experience_level = document.getElementById('experience_level').value;
+    const role = document.getElementById('sel-role').value;
+    const experience_level = document.getElementById('sel-level').value;
 
     // ✅ Use FormData — NOT JSON.stringify
     const formData = new FormData();
