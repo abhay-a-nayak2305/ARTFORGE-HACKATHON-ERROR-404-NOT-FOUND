@@ -1,15 +1,19 @@
-# render.yaml
-# This file tells Render everything about your deployment
+# render.yaml — PathForge deployment configuration
 
 services:
   - type: web
     name: pathforge-backend
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
+    # FIX: dockerContext must point to ./backend so the Dockerfile's
+    # "COPY . ." copies backend/* into /app correctly.
     dockerContext: ./backend
     plan: free
 
     envVars:
+      # GROQ_API_KEY: Set this as a secret in Render dashboard.
+      # sync: false means Render will NOT auto-sync it from this file —
+      # you must set it manually in the Render environment variables UI.
       - key: GROQ_API_KEY
         sync: false
 
@@ -17,11 +21,17 @@ services:
         value: production
 
       - key: DEBUG
-        value: false
+        value: "false"
 
       - key: PYTHON_VERSION
         value: "3.11"
 
-    healthCheckPath: /health
+      # FIX: Explicitly pass the allowed frontend origin as an env var.
+      # This lets you update CORS origins without redeploying — just change
+      # the value in Render dashboard and restart. Read this in config.py
+      # via: os.getenv("ALLOWED_ORIGINS", "https://aionboardingpathforge.netlify.app")
+      - key: ALLOWED_ORIGINS
+        value: "https://aionboardingpathforge.netlify.app"
 
+    healthCheckPath: /health
     autoDeploy: true
