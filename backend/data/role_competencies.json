@@ -1,0 +1,27 @@
+{
+  "Software Engineer": {
+    "skills": [
+      "Python", "Data Structures", "Algorithms", "System Design",
+      "Git", "CI/CD", "Docker", "Kubernetes", "Cloud Infra",
+      "Testing", "REST APIs", "SQL", "Linux", "Microservices"
+    ],
+    "onet_soc": "15-1252.00"
+  },
+  "Data Scientist": {
+    "skills": [
+      "Python", "Statistics", "Machine Learning", "Deep Learning",
+      "Feature Engineering", "Model Deployment", "SQL", "Pandas",
+      "Spark", "A/B Testing", "MLOps", "Data Wrangling", "NLP"
+    ],
+    "onet_soc": "15-2051.00"
+  },
+  "Product Manager": {
+    "skills": [
+      "Product Strategy", "Agile", "Scrum", "Roadmapping",
+      "Stakeholder Management", "OKRs", "GTM Strategy",
+      "Data Analytics", "UX Research", "Competitive Analysis",
+      "JIRA", "Communication", "Prioritization"
+    ],
+    "onet_soc": "11-2021.00"
+  }
+}

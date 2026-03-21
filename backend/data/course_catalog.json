@@ -1,0 +1,44 @@
+{
+  "software_engineering": {
+    "courses": [
+      "Data Structures & Algorithms Bootcamp",
+      "System Design Fundamentals",
+      "Kubernetes for Developers",
+      "Docker & Containerization",
+      "CI/CD with GitHub Actions",
+      "Distributed Systems Design",
+      "Cloud Infrastructure on AWS",
+      "Testing & QA Best Practices",
+      "REST API Design Patterns",
+      "Microservices Architecture"
+    ]
+  },
+  "data_science": {
+    "courses": [
+      "Statistics for Data Science",
+      "Machine Learning Fundamentals",
+      "Deep Learning with PyTorch",
+      "Feature Engineering Masterclass",
+      "MLOps & Model Deployment",
+      "Data Wrangling with Pandas",
+      "A/B Testing & Experimentation",
+      "Apache Spark for Big Data",
+      "SQL for Data Analysis",
+      "Natural Language Processing"
+    ]
+  },
+  "product_management": {
+    "courses": [
+      "Product Strategy & Vision",
+      "Agile & Scrum Certification",
+      "OKR Framework Implementation",
+      "Roadmapping with Stakeholders",
+      "Go-To-Market Strategy",
+      "Data Analytics for PMs",
+      "UX Research Methods",
+      "Competitive Analysis Frameworks",
+      "Prioritization Techniques",
+      "Executive Communication"
+    ]
+  }
+}
