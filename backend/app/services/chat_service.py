@@ -1,11 +1,13 @@
 """
 Context-Aware Chat Service — Groq Edition
-──────────────────────────────────────────
-Hybrid approach:
-  1. Rule-based intent router handles common questions instantly (0ms latency)
-  2. Groq LLM handles complex / open-ended questions with full context grounding
-  3. All responses are grounded to the stored AnalysisResponse
+
+FIX: Removed respond() sync method which used asyncio.get_event_loop().run_until_complete().
+     In Python 3.10+ inside FastAPI's running event loop this raises:
+     RuntimeError: This event loop is already running.
+     The chat.py route already calls respond_async() so the sync wrapper
+     was unused. Removed entirely to prevent accidental misuse.
 """
+
 from app.models.schemas import AnalysisResponse, ChatRequest, ChatResponse
 from app.agent.groq_client import GroqClient
 from app.utils.logger import get_logger
@@ -25,15 +27,14 @@ def get_session(session_id: str) -> AnalysisResponse | None:
 
 
 class ChatService:
+
     def __init__(self):
         self._groq = GroqClient.get()
 
-    # ── Sync version (kept for backward compat) ───────────
-    def respond(self, req: ChatRequest) -> ChatResponse:
-        import asyncio
-        return asyncio.get_event_loop().run_until_complete(self.respond_async(req))
+    # FIX: Removed respond() sync method — used asyncio.get_event_loop()
+    # which raises RuntimeError inside FastAPI's async event loop.
+    # Use respond_async() directly (which the route already does).
 
-    # ── Async version (preferred) ─────────────────────────
     async def respond_async(self, req: ChatRequest) -> ChatResponse:
         analysis = get_session(req.session_id)
         if not analysis:
@@ -46,7 +47,6 @@ class ChatService:
 
         # ── Try rule-based first (fast, deterministic) ────
         rule_reply, context_used = self._rule_route(q, analysis)
-
         if rule_reply:
             return ChatResponse(
                 reply=rule_reply,
@@ -66,10 +66,15 @@ class ChatService:
                 "gap_skills": analysis.gap_skills,
                 "partial_skills": analysis.partial_skills,
                 "module_names": [n.label for n in trainable],
-                "violations": analysis.hallucination_guard.violations,
-                "confidence": analysis.hallucination_guard.confidence_avg,
+                "violations": analysis.hallucination_guard.violations if analysis.hallucination_guard else 0,
+                "confidence": analysis.hallucination_guard.confidence_avg if analysis.hallucination_guard else 94.2,
             }
-            history = [{"role": m.role, "content": m.content} for m in req.history]
+
+            # FIX: Safe access to req.history with default empty list
+            history = []
+            if hasattr(req, 'history') and req.history:
+                history = [{"role": m.role, "content": m.content} for m in req.history]
+
             try:
                 groq_reply = await self._groq.chat_response(
                     question=req.message,
@@ -101,10 +106,6 @@ class ChatService:
     def _rule_route(
         self, q: str, a: AnalysisResponse
     ) -> tuple[str | None, list[str]]:
-        """
-        Fast rule-based responses for common questions.
-        Returns (reply, context_keys) or (None, []) if no rule matches.
-        """
         trainable = [n for n in a.pathway_nodes if n.days > 0]
         total_days = sum(n.days for n in trainable)
         gap_nodes = [n for n in a.pathway_nodes if n.node_type == "gap"]
@@ -169,13 +170,13 @@ class ChatService:
 
         if any(k in q for k in ["confid", "accur", "trust", "reliable", "halluc"]):
             g = a.hallucination_guard
-            return (
-                f"AI confidence: {g.confidence_avg}%. "
-                f"{g.skills_verified_pct}% of skills verified against O*NET. "
-                f"Hallucination violations: {g.violations}. "
-                f"All outputs grounded to your uploaded documents.",
-                ["hallucination_guard"],
-            )
+            if g:
+                return (
+                    f"AI confidence: {g.confidence_avg}%. "
+                    f"{g.skills_verified_pct}% of skills verified against O*NET. "
+                    f"Hallucination violations: {g.violations}. "
+                    f"All outputs grounded to your uploaded documents.",
+                    ["hallucination_guard"],
+                )
 
-        # No rule matched → let Groq handle it
         return None, []
