@@ -1,0 +1,27 @@
+# render.yaml
+# This file tells Render everything about your deployment
+
+services:
+  - type: web
+    name: pathforge-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+
+      - key: ENVIRONMENT
+        value: production
+
+      - key: DEBUG
+        value: false
+
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+    healthCheckPath: /health
+
+    autoDeploy: true
