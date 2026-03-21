@@ -1,119 +1,120 @@
+"""
+PathForge Pydantic Schemas
+──────────────────────────
+All request/response models used across the API.
+"""
+from __future__ import annotations
+from typing import Optional, Any
 from pydantic import BaseModel, Field
-from typing import Optional
-from enum import Enum
 
 
-class ExperienceLevel(str, Enum):
-    beginner = "beginner"
-    mid = "mid"
-    senior = "senior"
+# ── Skill primitives ──────────────────────────────────────
 
-
-class TargetRole(str, Enum):
-    software_engineer = "Software Engineer"
-    data_scientist = "Data Scientist"
-    product_manager = "Product Manager"
-
-
-# ── Request ──────────────────────────────────────────────
-class AnalyzeRequest(BaseModel):
-    role: TargetRole
-    experience_level: ExperienceLevel
-    use_demo: bool = False
-
-
-# ── Skill objects ─────────────────────────────────────────
 class ExtractedSkill(BaseModel):
     name: str
-    confidence: float = Field(ge=0.0, le=1.0)
-    source: str  # "resume" | "jd"
-    entity_type: str  # "TECH" | "SOFT" | "TOOL" | "CERT"
-    onet_code: Optional[str] = None
+    confidence: float = Field(default=0.88, ge=0.0, le=1.0)
+    source: str = "resume"          # "resume" | "jd"
+    entity_type: str = "TECH"       # "TECH" | "SOFT" | "DOMAIN"
 
 
 class SkillGapItem(BaseModel):
     skill: str
-    resume_score: float
-    jd_weight: float
+    resume_score: float = Field(ge=0.0, le=1.0)
+    jd_weight: float    = Field(ge=0.0, le=1.0)
     gap_magnitude: float
-    priority: str  # "HIGH" | "MED" | "LOW"
-    onet_verified: bool
+    priority: str       # "HIGH" | "MED" | "LOW"
+    onet_verified: bool = False
 
 
-# ── Graph / Pathway ───────────────────────────────────────
+# ── Pathway graph ─────────────────────────────────────────
+
 class PathwayNode(BaseModel):
     id: str
     label: str
-    node_type: str   # "gap" | "skill" | "check" | "end" | "you"
-    days: int
-    priority: Optional[str]
-    x: int
-    y: int
-    onet_code: Optional[str] = None
-    description: Optional[str] = None
-    resources: list[str] = []
+    node_type: str              # "you" | "gap" | "skill" | "check" | "end"
+    days: int = 0
+    priority: Optional[str] = None   # "HIGH" | "MED" | "LOW" | None
+    x: int = 0
+    y: int = 0
+    resources: list[str] = Field(default_factory=list)
 
 
 class PathwayEdge(BaseModel):
     source: str
     target: str
-    weight: float = 1.0
 
 
 # ── Reasoning trace ───────────────────────────────────────
+
 class TraceStep(BaseModel):
-    step_number: int
-    step_name: str
+    name: str
     input_summary: str
     output_summary: str
-    confidence: float
-    duration_ms: int
-    details: list[str]
+    details: list[str] = Field(default_factory=list)
+    confidence: float = 0.95
+    elapsed_ms: int = 0
 
 
-class HallucinationGuardReport(BaseModel):
-    violations: int
-    skills_verified_pct: float
-    catalog_match_pct: float
-    confidence_avg: float
-    false_positives: int
-    flagged_items: list[str] = []
+class ReasoningTrace(BaseModel):
+    steps: list[TraceStep] = Field(default_factory=list)
+    total_elapsed_ms: int = 0
 
 
-# ── Full analysis response ────────────────────────────────
+# ── Hallucination guard ───────────────────────────────────
+
+class GuardReport(BaseModel):
+    violations: int = 0
+    skills_verified_pct: float = 100.0
+    confidence_avg: float = 94.2
+    false_positives: int = 0
+
+
+# ── Graph dashboard data ──────────────────────────────────
+
+class GraphData(BaseModel):
+    """
+    Numerical skill comparison data for the frontend
+    Radar / Bar dashboard charts.
+
+    labels          — skill names (max 10)
+    current_profile — user's current level per skill (0-100)
+    target_role     — required level per skill (0-100)
+    """
+    labels: list[str]
+    current_profile: list[int]
+    target_role: list[int]
+
+
+# ── Main analysis response ────────────────────────────────
+
 class AnalysisResponse(BaseModel):
     session_id: str
     role: str
     experience_level: str
-    match_score: int
-    days_saved: int
-    total_training_days: int
-    known_skills: list[str]
-    partial_skills: list[str]
-    gap_skills: list[str]
-    skill_gaps_detail: list[SkillGapItem]
-    resume_skills: list[ExtractedSkill]
-    jd_skills: list[ExtractedSkill]
-    pathway_nodes: list[PathwayNode]
-    pathway_edges: list[PathwayEdge]
-    reasoning_trace: list[TraceStep]
-    hallucination_guard: HallucinationGuardReport
-    generated_at: str
 
+    # Scores
+    match_score: int = Field(ge=0, le=100)
+    days_saved: int = 0
+    total_training_days: int = 0
 
-# ── Chat ─────────────────────────────────────────────────
-class ChatMessage(BaseModel):
-    role: str  # "user" | "assistant"
-    content: str
+    # Skills
+    known_skills: list[str]   = Field(default_factory=list)
+    partial_skills: list[str] = Field(default_factory=list)
+    gap_skills: list[str]     = Field(default_factory=list)
 
+    skill_gaps_detail: list[SkillGapItem]   = Field(default_factory=list)
+    resume_skills:     list[ExtractedSkill] = Field(default_factory=list)
+    jd_skills:         list[ExtractedSkill] = Field(default_factory=list)
 
-class ChatRequest(BaseModel):
-    session_id: str
-    message: str
-    history: list[ChatMessage] = []
+    # Graph
+    pathway_nodes: list[PathwayNode] = Field(default_factory=list)
+    pathway_edges: list[PathwayEdge] = Field(default_factory=list)
 
+    # AI reasoning
+    reasoning_trace:    Optional[ReasoningTrace] = None
+    hallucination_guard: Optional[GuardReport]   = None
 
-class ChatResponse(BaseModel):
-    reply: str
-    context_used: list[str] = []
-    confidence: float = 1.0
+    # ── NEW: chart data for frontend dashboard ────────────
+    graph_data: Optional[GraphData] = None
+
+    generated_at: str = ""
