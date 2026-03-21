@@ -1,8 +1,10 @@
 """
 POST /api/analyze  — now uses Groq LLM for enhanced reasoning
 """
+import json
+import asyncio
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import Optional, Annotated
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,12 +16,12 @@ from app.utils.file_handler import (
     extract_text, get_demo_resume, get_demo_jd, validate_file_size,
 )
 from app.config import get_settings
-from app.agent.orchestrator import AgentOrchestrator
 from app.utils.logger import get_logger
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 logger = get_logger(__name__)
 settings = get_settings()
+
 
 @router.post("/analyze/stream")
 async def analyze_stream(
@@ -28,32 +30,40 @@ async def analyze_stream(
     use_demo: Annotated[bool, Form()] = False,
     resume_file: Optional[UploadFile] = File(None),
     jd_file: Optional[UploadFile] = File(None),
-    orchestrator: AgentOrchestrator = Depends(get_orchestrator)
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     async def event_generator():
         steps = [
-            ("BERT NER",          "Extracting skills from resume…"),
-            ("Groq LLM",          "Running LLM skill extraction…"),
-            ("Gap Computation",   "Computing cosine similarity…"),
-            ("O*NET Grounding",   "Verifying against O*NET…"),
+            ("BERT NER",        "Extracting skills from resume…"),
+            ("Groq LLM",        "Running LLM skill extraction…"),
+            ("Gap Computation",  "Computing cosine similarity…"),
+            ("O*NET Grounding", "Verifying against O*NET…"),
         ]
 
         for i, (name, msg) in enumerate(steps):
-            yield f"data: {json.dumps({'step': i+1,'name':name,'message':msg})}\n\n"
+            yield f"data: {json.dumps({'step': i+1, 'name': name, 'message': msg})}\n\n"
             await asyncio.sleep(0.1)
 
-        # Now call the real orchestrator
-        result = await orchestrator.run_analysis(
-            role=role,
-            experience_level=experience_level,
-            resume_file=resume_file,
-            jd_file=jd_file,
-            use_demo=use_demo
-        )
+        try:
+            result = await orchestrator.run_analysis(
+                role=role,
+                experience_level=experience_level,
+                resume_file=resume_file,
+                jd_file=jd_file,
+                use_demo=use_demo,
+            )
+            yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'done': True, 'error': str(e)})}\n\n"
 
-        yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",       # important for Render/nginx proxies
+        },
+    )
 
 
 @router.post("/analyze")
@@ -156,4 +166,3 @@ async def export_report(
             content=analysis.model_dump(),
             headers={"Content-Disposition": f'attachment; filename="PathForge_{session_id[:8]}.json"'},
         )
-
