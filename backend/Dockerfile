@@ -201,4 +201,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
 # the contents of backend/ directly into /app (not into /app/backend).
 # The app module is therefore at /app/app/main.py → "app.main:app".
 # No "cd /app/backend" needed — just run uvicorn from /app directly.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
+CMD ["sh", "-c", "echo '=== /app contents ===' && ls -la /app && echo '=== /app/app ===' && ls -la /app/app 2>/dev/null || echo 'NO /app/app DIR' && PYTHONPATH=/app uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
