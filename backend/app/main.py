@@ -3,19 +3,14 @@ PathForge FastAPI Application — Groq Edition
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from app.config import get_settings
 from app.utils.logger import configure_logging, get_logger
-from app.api.middleware import register_middleware
-from app.api.routes import analyze, chat, health, pathway
-from app.dependencies import init_db
-# Add this import
 from app.api.routes import analyze, chat, health, pathway, quiz
-
-# Add this line with the other routers
-app.include_router(quiz.router)
+from app.dependencies import init_db
 
 settings = get_settings()
 configure_logging(debug=settings.DEBUG)
@@ -55,12 +50,21 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-register_middleware(app, settings.ALLOWED_ORIGINS)
+# Register CORS middleware directly (no circular import)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Include routers
 app.include_router(health.router)
 app.include_router(analyze.router)
 app.include_router(chat.router)
 app.include_router(pathway.router)
+app.include_router(quiz.router)
 
 # Serve frontend
 frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
