@@ -118,3 +118,21 @@ class AnalysisResponse(BaseModel):
     graph_data: Optional[GraphData] = None
 
     generated_at: str = ""
+
+# ── Chat schemas ──────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+    history: list[ChatMessage] = Field(default_factory=list)
+    pathway_context: Optional[dict] = None
+
+class ChatResponse(BaseModel):
+    reply: str
+    context_used: list[str] = Field(default_factory=list)
+    confidence: float = 1.0
+    used_groq: bool = False
