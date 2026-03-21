@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = int(os.environ.get("PORT", 10000))
 
-    ALLOWED_ORIGINS: list[] = [
+    ALLOWED_ORIGINS: list = [
         "http://localhost:3000",
         "http://localhost:8000",
         "http://localhost:5173",
