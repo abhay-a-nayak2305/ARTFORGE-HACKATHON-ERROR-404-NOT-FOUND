@@ -246,4 +246,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
     CMD curl -f http://localhost:10000/health || exit 1
 
 # Debug: show directory contents at startup, then launch
-CMD ["sh", "-c", "echo '=== /app contents ===' && ls -la /app && echo '=== checking for app module ===' && ls -la /app/app 2>/dev/null || echo 'NO /app/app FOUND' && echo '=== Python path ===' && python -c 'import sys; print(sys.path)' && cd /app && python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
+CMD ["sh", "-c", "cd /backend && python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --workers 1"]
