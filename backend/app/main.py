@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 from pathlib import Path
 
 from app.config import get_settings
@@ -67,10 +69,16 @@ app.include_router(pathway.router)
 app.include_router(quiz.router)
 
 # Serve frontend
-frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
-if frontend_dir.exists():
-    app.mount(
-        "/",
-        StaticFiles(directory=str(frontend_dir), html=True),
-        name="frontend",
-    )
+base_path = Path(__file__).resolve().parents[2] 
+frontend_path = base_path / "frontend"
+
+# 2. Mount the static files (CSS, JS, Images)
+if frontend_path.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_path)), name="static")
+
+    # 3. Serve the index.html at the root URL "/"
+    @app.get("/")
+    async def serve_frontend():
+        return FileResponse(frontend_path / "index.html")
+else:
+    print(f"Warning: Frontend directory not found at {frontend_path}")
