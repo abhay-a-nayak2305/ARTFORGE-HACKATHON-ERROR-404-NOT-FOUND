@@ -154,6 +154,8 @@ class ResumeParser:
                 if words:
                     import numpy as np
                     word_embs = self._emb.embed(words)
+                    if self._skill_embeddings is None:
+                        self._skill_embeddings = self._emb.embed(ALL_SKILLS)
                     sims = (word_embs @ self._skill_embeddings.T)  # (words, skills)
                     best_skill_idx = sims.argmax(axis=1)
                     best_scores = sims.max(axis=1)
