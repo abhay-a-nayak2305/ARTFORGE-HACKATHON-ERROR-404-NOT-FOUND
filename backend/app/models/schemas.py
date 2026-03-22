@@ -6,7 +6,7 @@ All request/response models used across the API.
 from __future__ import annotations
 from typing import Optional, Any
 from pydantic import BaseModel, Field
-
+from pydantic import field_validator
 
 # ── Skill primitives ──────────────────────────────────────
 
@@ -60,6 +60,10 @@ class ReasoningTrace(BaseModel):
     steps: list[TraceStep] = Field(default_factory=list)
     total_elapsed_ms: int = 0
 
+    @classmethod
+    def from_steps(cls, steps: list) -> "ReasoningTrace":
+        return cls(steps=steps)
+
 
 # ── Hallucination guard ───────────────────────────────────
 
@@ -110,9 +114,14 @@ class AnalysisResponse(BaseModel):
     # Graph
     pathway_nodes: list[PathwayNode] = Field(default_factory=list)
     pathway_edges: list[PathwayEdge] = Field(default_factory=list)
+    reasoning_trace: Optional[ReasoningTrace] = None
 
-    # AI reasoning
-    reasoning_trace:    Optional[ReasoningTrace] = None
+    @field_validator("reasoning_trace", mode="before")
+    @classmethod
+    def coerce_trace(cls, v):
+        if isinstance(v, list):
+            return {"steps": v, "total_elapsed_ms": 0}
+        return v
     hallucination_guard: Optional[GuardReport]   = None
 
     # ── NEW: chart data for frontend dashboard ────────────
