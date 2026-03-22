@@ -31,10 +31,6 @@ async def lifespan(app: FastAPI):
     from app.dependencies import init_db
     await init_db()
 
-    from app.utils.embeddings import EmbeddingService
-    EmbeddingService.get()
-    logger.info("pathforge.embeddings_warmed")
-
     from app.agent.groq_client import GroqClient
     groq = GroqClient.get()
     logger.info("pathforge.groq_ready available=%s", groq.available)
