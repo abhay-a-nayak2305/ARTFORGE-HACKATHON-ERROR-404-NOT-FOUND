@@ -3274,25 +3274,33 @@
 
     /* ── _injectBackendData — merges real API response into ROLES ── */
     function _injectBackendData(data) {
-        const nodes = data.pathway_nodes.map(n => ({
-            id: n.id, t: n.node_type, node_type: n.node_type,
-            x: n.x, y: n.y, label: n.label, days: n.days, pri: n.priority
-        }));
-        const edges = data.pathway_edges.map(e => [e.source, e.target]);
-        ROLES[data.role] = {
-            ...(ROLES[data.role] || {}),
-            color: (ROLES[data.role] || {}).color || "#00e5b8",
-            nodes, edges,
-            known:   data.known_skills,
-            partial: data.partial_skills,
-            gaps:    data.gap_skills,
-            score:   data.match_score,
-            saved:   data.days_saved,
-            skills:  data.jd_skills.map(s => s.name || s).slice(0, 10),
-            graphData: data.graph_data || null,
-            _raw: data
-        };
+    const nodes = data.pathway_nodes.map(n => ({
+        id: n.id, t: n.node_type, node_type: n.node_type,
+        x: n.x, y: n.y, label: n.label, days: n.days, pri: n.priority
+    }));
+    const edges = data.pathway_edges.map(e => [e.source, e.target]);
+
+    const payload = {
+        ...(ROLES[role] || {}),
+        color: (ROLES[role] || {}).color || "#00e5b8",
+        nodes, edges,
+        known:    data.known_skills,
+        partial:  data.partial_skills,
+        gaps:     data.gap_skills,
+        score:    data.match_score,
+        saved:    data.days_saved,
+        skills:   data.jd_skills.map(s => s.name || s).slice(0, 10),
+        graphData: data.graph_data || null,
+        _raw: data
+    };
+
+    // Write under BOTH the frontend role variable AND whatever the backend returned
+    // This guarantees showResult() always finds the data regardless of case mismatch
+    ROLES[role] = payload;
+    if (data.role && data.role !== role) {
+        ROLES[data.role] = payload;
     }
+}
 
     /* ── D3 GRAPH — uses _nt() for node type ── */
     function renderGraphD3(d, c) {
@@ -3822,6 +3830,8 @@
             const res = await fetchWithRetry(`${API_BASE}/analyze`, { method: 'POST', body: formData });
             if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Analysis failed'); }
             const data = await res.json();
+            console.log("data.role from backend:", data.role);   // ← add this
+            console.log("frontend role var:", role);   
             _sessionId = data.session_id;
             _injectBackendData(data);
             if (atimer) { clearInterval(atimer); atimer = null; }
