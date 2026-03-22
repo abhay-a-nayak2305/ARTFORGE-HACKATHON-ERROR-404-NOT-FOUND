@@ -3,8 +3,18 @@
 """
 PathForge AI Agent Orchestrator — Groq Edition
 ────────────────────────────────────────────────
+FIX: AgentOrchestrator is now a module-level singleton.
+     Previously get_orchestrator() (FastAPI dependency) created a new
+     AgentOrchestrator() on every request, which called ResumeParser()
+     in __init__, which triggered spaCy to reload (~4s, ~15MB) every time.
+     When resume + JD were parsed concurrently that became a double-load
+     → OOM kill → 502 with no CORS headers.
+
+     Now get_orchestrator() returns the same instance every call, and
+     ResumeParser is obtained via get_parser() (module-level singleton).
+
 Pipeline (enhanced with Groq LLM):
-  1) Entity Extraction: BERT NER + Groq skill extraction
+  1) Entity Extraction: spaCy/regex + Groq skill extraction
   2) Gap Computation: embeddings + Groq narrative/prioritization
   3) O*NET Grounding: verify skills against taxonomy
   4) Adaptive Pathing: build BFS learning graph (+ Groq tips)
@@ -16,7 +26,7 @@ import time
 import uuid
 from datetime import datetime
 
-from app.agent.tools.resume_parser import ResumeParser
+from app.agent.tools.resume_parser import get_parser        # ← singleton, not ResumeParser()
 from app.agent.tools.jd_parser import JDParser
 from app.agent.tools.gap_analyzer import GapAnalyzer
 from app.agent.tools.graph_builder import GraphBuilder
@@ -60,8 +70,15 @@ _ALL_KNOWN_SKILLS = [
 
 
 class AgentOrchestrator:
+    """
+    Do NOT instantiate this directly in request handlers.
+    Use get_orchestrator() which returns the module-level singleton.
+    """
+
     def __init__(self):
-        self._resume_parser = ResumeParser()
+        # get_parser() returns the module-level ResumeParser singleton —
+        # spaCy is loaded once and reused. Never call ResumeParser() here.
+        self._resume_parser = get_parser()
         self._jd_parser = JDParser()
         self._gap_analyzer = GapAnalyzer()
         self._graph_builder = GraphBuilder()
@@ -86,12 +103,12 @@ class AgentOrchestrator:
             groq_available=self._groq.available,
         )
 
-        # STEP 1 — Entity Extraction (BERT + Groq)
+        # STEP 1 — Entity Extraction (spaCy/regex + Groq)
         with tracer.step(
             "Entity Extraction",
             f"Resume: {len(resume_text.split())} words | JD: {len(jd_text.split())} words",
         ):
-            # BERT parsers
+            # Regex + spaCy parsers (shared singleton — no reload)
             resume_skills_bert = self._resume_parser.parse(resume_text, source="resume")
             jd_skills_bert = self._jd_parser.parse(jd_text)
 
@@ -106,15 +123,14 @@ class AgentOrchestrator:
                 ),
             )
 
-            # Merge (BERT takes precedence; add Groq-only names with conf=0.88)
+            # Merge (regex/spaCy takes precedence; add Groq-only names with conf=0.88)
             resume_skills = self._merge_skills(resume_skills_bert, groq_resume_names, "resume")
             jd_skills = self._merge_skills(jd_skills_bert, groq_jd_names, "jd")
 
-            tracer.add_detail(f"BERT NER: {len(resume_skills_bert)} resume + {len(jd_skills_bert)} JD skills")
+            tracer.add_detail(f"spaCy+regex: {len(resume_skills_bert)} resume + {len(jd_skills_bert)} JD skills")
             tracer.add_detail(f"Groq LLM: {len(groq_resume_names)} resume + {len(groq_jd_names)} JD skills")
             tracer.add_detail(f"Merged (deduplicated): {len(resume_skills)} resume | {len(jd_skills)} JD")
             tracer.add_detail("Groq model: llama-3.3-70b-versatile")
-            tracer.add_detail("BERT model: dslim/bert-base-NER")
             tracer.set_output(
                 f"{len(resume_skills)} resume + {len(jd_skills)} JD skills extracted",
                 confidence=0.96,
@@ -123,13 +139,13 @@ class AgentOrchestrator:
         # STEP 2 — Gap Computation
         with tracer.step(
             "Gap Computation",
-            "768-dim embeddings | threshold α=0.78",
+            "String matching + embedding similarity | threshold α=0.78",
         ):
             known, partial, gaps, gap_details = self._gap_analyzer.analyze(
                 resume_skills, jd_skills
             )
 
-            # Groq adds summary/priority narrative (optional, non-blocking if down)
+            # Groq adds summary/priority narrative (optional, non-blocking)
             groq_analysis = await self._groq.enhance_gap_analysis(
                 role=role,
                 known=known,
@@ -138,8 +154,8 @@ class AgentOrchestrator:
                 experience_level=experience_level,
             )
 
-            tracer.add_detail(f"Cosine sim matrix: {len(resume_skills)}×{len(jd_skills)}")
-            tracer.add_detail(f"Threshold α=0.78 | KNOWN: {len(known)} | PARTIAL: {len(partial)} | GAP: {len(gaps)}")
+            tracer.add_detail(f"Skills compared: {len(resume_skills)}×{len(jd_skills)}")
+            tracer.add_detail(f"KNOWN: {len(known)} | PARTIAL: {len(partial)} | GAP: {len(gaps)}")
             if isinstance(groq_analysis, dict):
                 if groq_analysis.get("summary"):
                     tracer.add_detail(f"Groq summary: {groq_analysis['summary'][:80]}")
@@ -182,7 +198,6 @@ class AgentOrchestrator:
                     tips = await self._groq.generate_learning_tips(
                         node.label, role, node.days
                     )
-                    # resources: List[str] on the model
                     node.resources = tips or []
 
             high_count = len([n for n in pathway_nodes if n.node_type == "gap" and n.priority == "HIGH"])
@@ -238,7 +253,6 @@ class AgentOrchestrator:
             elapsed_ms=elapsed_total,
         )
 
-        # Assemble final response
         return AnalysisResponse(
             session_id=session_id,
             role=role,
@@ -256,7 +270,7 @@ class AgentOrchestrator:
             pathway_edges=pathway_edges,
             reasoning_trace=tracer.to_schema(),
             hallucination_guard=guard_report,
-            graph_data=graph_data,  # NEW — fuels the frontend graphs
+            graph_data=graph_data,
             generated_at=datetime.utcnow().isoformat() + "Z",
         )
 
@@ -270,17 +284,13 @@ class AgentOrchestrator:
         groq_names: list[str],
         source: str,
     ) -> list[ExtractedSkill]:
-        """
-        Merge BERT-extracted skills with Groq skill names.
-        BERT results take precedence (include confidence/entity_type).
-        """
         existing = {s.name.lower(): s for s in bert_skills}
         for name in groq_names:
             key = name.lower()
             if key not in existing:
                 existing[key] = ExtractedSkill(
                     name=name,
-                    confidence=0.88,  # Groq-added (not BERT-verified)
+                    confidence=0.88,
                     source=source,
                     entity_type="TECH",
                 )
@@ -294,27 +304,16 @@ class AgentOrchestrator:
         gap_details: list[SkillGapItem],
         experience_level: str,
     ) -> GraphData:
-        """
-        Construct GraphData for frontend charts:
-          - labels: top skills (max 10)
-          - current_profile: 0–100 per skill (user proficiency)
-          - target_role: 0–100 per skill (role requirement baseline)
-        """
-        # Prioritize: gaps first (critical), then partial, then known
         prioritized = gaps + partial + known
         labels = prioritized[:10] if prioritized else (known[:10] or partial[:10] or gaps[:10])
 
-        # Map experience level to an anchor score for known skills
         exp_anchor = {"beginner": 45, "mid": 65, "senior": 85}.get(experience_level, 50)
+        weight_map = {d.skill: d.jd_weight for d in gap_details} if gap_details else {}
 
         current: list[int] = []
         target: list[int] = []
 
-        # Use O*NET weight/priority to tweak target slightly if available
-        weight_map = {d.skill: d.jd_weight for d in gap_details} if gap_details else {}
-
         for skill in labels:
-            # Target baseline: 85–95 (slightly bump for higher JD weight)
             base_target = 90
             if skill in weight_map:
                 w = weight_map[skill]
@@ -326,7 +325,30 @@ class AgentOrchestrator:
             elif skill in partial:
                 current.append(max(15, exp_anchor - 30))
             else:
-                # gap
                 current.append(10)
 
         return GraphData(labels=labels, current_profile=current, target_role=target)
+
+
+# ═══════════════════════════════════════════════════════════
+# MODULE-LEVEL SINGLETON
+# ═══════════════════════════════════════════════════════════
+
+_ORCHESTRATOR_INSTANCE: AgentOrchestrator | None = None
+
+
+def get_orchestrator() -> AgentOrchestrator:
+    """
+    Return the shared AgentOrchestrator singleton.
+
+    Use as a FastAPI dependency:
+        orchestrator: AgentOrchestrator = Depends(get_orchestrator)
+
+    This replaces the previous pattern in dependencies.py where a new
+    AgentOrchestrator() was created per request, causing spaCy to reload
+    on every call and OOM-killing the server on concurrent requests.
+    """
+    global _ORCHESTRATOR_INSTANCE
+    if _ORCHESTRATOR_INSTANCE is None:
+        _ORCHESTRATOR_INSTANCE = AgentOrchestrator()
+    return _ORCHESTRATOR_INSTANCE
