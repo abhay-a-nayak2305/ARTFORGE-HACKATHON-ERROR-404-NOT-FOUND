@@ -1,20 +1,25 @@
 """
-Resume Parser Tool
-──────────────────
-1. Runs spaCy NER to detect PERSON, ORG, DATE entities.
-2. Runs a BERT-based NER (dslim/bert-base-NER) for fine-grained
-   entity classification.
-3. Matches tokens against a curated skill taxonomy using regex +
-   embedding similarity as a fallback.
-4. Returns a list of ExtractedSkill with confidence scores.
+Resume Parser Tool — Memory-Optimized for Render Free Tier
+──────────────────────────────────────────────────────────
+FIX: Removed dslim/bert-base-NER transformer pipeline.
+     That model is ~400MB and caused OOM kills on Render's 512MB free tier.
+     The orchestrator already uses Groq LLaMA-3.3 for skill extraction which
+     is far more accurate. BERT NER was redundant and memory-expensive.
+
+Current pipeline (lightweight):
+1. spaCy en_core_web_sm (~15MB) for basic NER context
+2. Regex matching against curated skill taxonomy (instant, zero memory)
+3. Embedding similarity fallback via MiniLM (already loaded at startup)
+
+Groq handles the heavy lifting via extract_skills_from_text() in the orchestrator.
 """
+
 import re
 import time
 import logging
 from typing import Optional
 
 import spacy
-from transformers import pipeline, TokenClassificationPipeline
 
 from app.models.schemas import ExtractedSkill
 from app.utils.embeddings import EmbeddingService
@@ -22,7 +27,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Curated skill taxonomy (expandable via CSV/DB) ────────
+# ── Curated skill taxonomy ────────────────────────────────
 TECH_SKILLS: list[str] = [
     # Languages
     "Python", "JavaScript", "TypeScript", "Java", "Go", "Rust", "C++", "C#",
@@ -64,129 +69,112 @@ _SKILL_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Canonical name lookup (lowercase → proper case)
+_SKILL_CANONICAL = {s.lower(): s for s in ALL_SKILLS}
+
 
 class ResumeParser:
-    """Stateful parser — loads models once, reused across requests."""
+    """
+    Lightweight parser — spaCy + regex only.
+    BERT NER removed to fit within Render free tier 512MB RAM limit.
+    Groq LLM in the orchestrator handles deep skill extraction.
+    """
 
     def __init__(self):
         self._nlp: Optional[spacy.Language] = None
-        self._bert_ner: Optional[TokenClassificationPipeline] = None
         self._emb = EmbeddingService.get()
         self._skill_embeddings = self._emb.embed(ALL_SKILLS)
 
-    def _load_models(self):
+    def _load_spacy(self):
+        """Lazy-load spaCy only when first needed."""
         if self._nlp is None:
             try:
                 self._nlp = spacy.load("en_core_web_sm")
                 logger.info("spaCy model loaded")
             except OSError:
-                logger.warning("spaCy model not found; skipping spaCy NER")
+                logger.warning("spaCy model not found — skipping spaCy NER")
                 self._nlp = None
 
-        if self._bert_ner is None:
-            try:
-                self._bert_ner = pipeline(
-                    "ner",
-                    model="dslim/bert-base-NER",
-                    aggregation_strategy="simple",
-                    device=-1,  # CPU; change to 0 for GPU
-                )
-                logger.info("BERT NER model loaded")
-            except Exception as e:
-                logger.warning("BERT NER unavailable: %s", e)
-                self._bert_ner = None
-
-    def parse(self, text: str, source: str = "resume") -> list[ExtractedSkill]:
+    def parse(
+        self,
+        text: str,
+        source: str = "resume",
+    ) -> list[ExtractedSkill]:
         """
-        Main entry point. Returns deduplicated ExtractedSkill list.
+        Extract skills from text using:
+        1. Regex against curated taxonomy (primary — fast, accurate)
+        2. spaCy context filtering (removes false positives)
+        3. Embedding similarity for near-matches (fallback)
 
-        Strategy (layered, highest confidence wins):
-          Layer 1 — Regex match against curated taxonomy  (conf ~0.95)
-          Layer 2 — spaCy NER for context-aware entities  (conf ~0.80)
-          Layer 3 — Embedding similarity fallback          (conf ~0.72)
+        Returns deduplicated list of ExtractedSkill.
         """
         t0 = time.time()
-        self._load_models()
-        skills: dict[str, ExtractedSkill] = {}
+        self._load_spacy()
 
-        # ── Layer 1: Regex ────────────────────────────────
+        found: dict[str, ExtractedSkill] = {}
+
+        # ── Step 1: Regex matching ────────────────────────
         for match in _SKILL_PATTERN.finditer(text):
             raw = match.group(0)
-            canonical = self._canonicalize(raw)
-            if canonical and canonical not in skills:
-                entity_type = "SOFT" if canonical in SOFT_SKILLS else "TECH"
-                skills[canonical] = ExtractedSkill(
+            canonical = _SKILL_CANONICAL.get(raw.lower(), raw)
+            if canonical not in found:
+                entity_type = "TECH" if canonical in TECH_SKILLS else "SOFT"
+                found[canonical] = ExtractedSkill(
                     name=canonical,
-                    confidence=0.95,
+                    confidence=0.92,
                     source=source,
                     entity_type=entity_type,
                 )
 
-        # ── Layer 2: BERT NER ─────────────────────────────
-        if self._bert_ner:
-            try:
-                ner_results = self._bert_ner(text[:512])  # BERT 512-token limit
-                for ent in ner_results:
-                    word = ent["word"].strip()
-                    if len(word) < 2:
-                        continue
-                    canonical = self._canonicalize(word)
-                    if canonical and canonical not in skills:
-                        skills[canonical] = ExtractedSkill(
+        # ── Step 2: spaCy ORG entities as potential tech terms ────
+        if self._nlp and len(text) < 50000:
+            doc = self._nlp(text[:10000])  # cap at 10k chars to save memory
+            for ent in doc.ents:
+                if ent.label_ in ("ORG", "PRODUCT"):
+                    name = ent.text.strip()
+                    canonical = _SKILL_CANONICAL.get(name.lower())
+                    if canonical and canonical not in found:
+                        found[canonical] = ExtractedSkill(
                             name=canonical,
-                            confidence=round(float(ent["score"]), 3),
+                            confidence=0.78,
                             source=source,
                             entity_type="TECH",
                         )
-            except Exception as e:
-                logger.warning("BERT NER inference failed: %s", e)
 
-        # ── Layer 3: Embedding fallback for long noun phrases ─
-        noun_phrases = self._extract_noun_phrases(text)
-        for phrase in noun_phrases:
-            if phrase in skills:
-                continue
-            phrase_emb = self._emb.embed([phrase])
-            from sklearn.metrics.pairwise import cosine_similarity
-            import numpy as np
-            sims = cosine_similarity(phrase_emb, self._skill_embeddings)[0]
-            best_idx = int(np.argmax(sims))
-            best_score = float(sims[best_idx])
-            if best_score >= 0.82:
-                canonical = ALL_SKILLS[best_idx]
-                if canonical not in skills:
-                    skills[canonical] = ExtractedSkill(
-                        name=canonical,
-                        confidence=round(best_score, 3),
-                        source=source,
-                        entity_type="TECH" if canonical in TECH_SKILLS else "SOFT",
-                    )
+        # ── Step 3: Embedding similarity for short texts ──
+        # Only run if regex found very few skills (sparse text)
+        if len(found) < 3 and len(text) > 50:
+            try:
+                words = list({
+                    w.strip(".,;:()")
+                    for w in text.split()
+                    if len(w) > 3
+                })[:80]  # cap candidates to save memory
+
+                if words:
+                    import numpy as np
+                    word_embs = self._emb.embed(words)
+                    sims = (word_embs @ self._skill_embeddings.T)  # (words, skills)
+                    best_skill_idx = sims.argmax(axis=1)
+                    best_scores = sims.max(axis=1)
+
+                    for i, score in enumerate(best_scores):
+                        if float(score) >= 0.88:
+                            skill = ALL_SKILLS[best_skill_idx[i]]
+                            if skill not in found:
+                                found[skill] = ExtractedSkill(
+                                    name=skill,
+                                    confidence=round(float(score), 3),
+                                    source=source,
+                                    entity_type="TECH" if skill in TECH_SKILLS else "SOFT",
+                                )
+            except Exception as e:
+                logger.warning("resume_parser.embedding_fallback_failed: %s", e)
 
         elapsed_ms = int((time.time() - t0) * 1000)
         logger.info(
-            "resume_parser.parse",
-            source=source,
-            extracted=len(skills),
-            elapsed_ms=elapsed_ms,
+            "resume_parser.parse source=%s skills=%d elapsed_ms=%d",
+            source, len(found), elapsed_ms,
         )
-        return list(skills.values())
 
-    def _canonicalize(self, raw: str) -> Optional[str]:
-        """Map raw string to canonical skill name using case-insensitive lookup."""
-        raw_lower = raw.lower()
-        for skill in ALL_SKILLS:
-            if skill.lower() == raw_lower:
-                return skill
-        return None
-
-    def _extract_noun_phrases(self, text: str) -> list[str]:
-        """Use spaCy to extract noun chunks as candidate skill phrases."""
-        if self._nlp is None:
-            return []
-        doc = self._nlp(text[:10000])  # limit for speed
-        phrases = []
-        for chunk in doc.noun_chunks:
-            clean = chunk.text.strip()
-            if 3 <= len(clean) <= 40:
-                phrases.append(clean)
-        return phrases
+        return list(found.values())
