@@ -83,7 +83,7 @@ class ResumeParser:
     def __init__(self):
         self._nlp: Optional[spacy.Language] = None
         self._emb = EmbeddingService.get()
-        self._skill_embeddings = self._emb.embed(ALL_SKILLS)
+        self._skill_embeddings = None  # lazy-loaded on first use
 
     def _load_spacy(self):
         """Lazy-load spaCy only when first needed."""
