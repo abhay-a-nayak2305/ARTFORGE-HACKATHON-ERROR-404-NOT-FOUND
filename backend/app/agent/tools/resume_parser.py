@@ -1,22 +1,23 @@
 """
 Resume Parser Tool — Memory-Optimized for Render Free Tier
 ──────────────────────────────────────────────────────────
-FIX: Removed dslim/bert-base-NER transformer pipeline.
-     That model is ~400MB and caused OOM kills on Render's 512MB free tier.
-     The orchestrator already uses Groq LLaMA-3.3 for skill extraction which
-     is far more accurate. BERT NER was redundant and memory-expensive.
+FIX 1: Removed dslim/bert-base-NER transformer pipeline (~400MB OOM).
+FIX 2: Module-level spaCy singleton — loaded ONCE at startup, shared
+        across all calls. Previously a new ResumeParser() was created
+        per request, causing spaCy to reload on every call. When resume
+        and JD were parsed concurrently, spaCy loaded TWICE in parallel
+        → OOM kill → 502 with no CORS headers sent back to browser.
 
 Current pipeline (lightweight):
-1. spaCy en_core_web_sm (~15MB) for basic NER context
+1. spaCy en_core_web_sm (~15MB) — loaded ONCE via module-level singleton
 2. Regex matching against curated skill taxonomy (instant, zero memory)
-3. Embedding similarity fallback via MiniLM (already loaded at startup)
+3. Embedding similarity fallback via MiniLM (cached at module level)
 
-Groq handles the heavy lifting via extract_skills_from_text() in the orchestrator.
+Groq handles deep skill extraction via orchestrator.
 """
 
 import re
 import time
-import logging
 from typing import Optional
 
 import spacy
@@ -73,27 +74,67 @@ _SKILL_PATTERN = re.compile(
 _SKILL_CANONICAL = {s.lower(): s for s in ALL_SKILLS}
 
 
+# ═══════════════════════════════════════════════════════════
+# MODULE-LEVEL SINGLETONS
+# These are initialised once when the module is first imported
+# (i.e. at server startup) and reused on every subsequent call.
+# This is the key fix — no more per-request spaCy reloads.
+# ═══════════════════════════════════════════════════════════
+
+_NLP: Optional[spacy.Language] = None
+_SKILL_EMBEDDINGS = None
+_PARSER_INSTANCE: Optional["ResumeParser"] = None
+
+
+def _get_nlp() -> Optional[spacy.Language]:
+    """Return shared spaCy model, loading it once if not yet loaded."""
+    global _NLP
+    if _NLP is None:
+        try:
+            _NLP = spacy.load("en_core_web_sm")
+            logger.info("spaCy model loaded")
+        except OSError:
+            logger.warning("spaCy model not found — skipping spaCy NER")
+            _NLP = None
+    return _NLP
+
+
+def _get_skill_embeddings():
+    """Compute and cache skill embeddings once at module level."""
+    global _SKILL_EMBEDDINGS
+    if _SKILL_EMBEDDINGS is None:
+        try:
+            emb = EmbeddingService.get()
+            _SKILL_EMBEDDINGS = emb.embed(ALL_SKILLS)
+        except Exception as e:
+            logger.warning("resume_parser: could not precompute skill embeddings: %s", e)
+    return _SKILL_EMBEDDINGS
+
+
+def get_parser() -> "ResumeParser":
+    """
+    Return the shared ResumeParser singleton.
+    Use this instead of ResumeParser() in the orchestrator/services.
+    """
+    global _PARSER_INSTANCE
+    if _PARSER_INSTANCE is None:
+        _PARSER_INSTANCE = ResumeParser()
+    return _PARSER_INSTANCE
+
+
+# ═══════════════════════════════════════════════════════════
+# PARSER CLASS
+# ═══════════════════════════════════════════════════════════
+
 class ResumeParser:
     """
-    Lightweight parser — spaCy + regex only.
-    BERT NER removed to fit within Render free tier 512MB RAM limit.
-    Groq LLM in the orchestrator handles deep skill extraction.
+    Lightweight resume/JD skill parser.
+    Do NOT instantiate per-request — use get_parser() for the singleton.
     """
 
     def __init__(self):
-        self._nlp: Optional[spacy.Language] = None
+        # Only grab EmbeddingService reference — spaCy loaded via module singleton
         self._emb = EmbeddingService.get()
-        self._skill_embeddings = None  # lazy-loaded on first use
-
-    def _load_spacy(self):
-        """Lazy-load spaCy only when first needed."""
-        if self._nlp is None:
-            try:
-                self._nlp = spacy.load("en_core_web_sm")
-                logger.info("spaCy model loaded")
-            except OSError:
-                logger.warning("spaCy model not found — skipping spaCy NER")
-                self._nlp = None
 
     def parse(
         self,
@@ -102,14 +143,16 @@ class ResumeParser:
     ) -> list[ExtractedSkill]:
         """
         Extract skills from text using:
-        1. Regex against curated taxonomy (primary — fast, accurate)
-        2. spaCy context filtering (removes false positives)
-        3. Embedding similarity for near-matches (fallback)
+        1. Regex against curated taxonomy  (fast, ~0ms)
+        2. spaCy ORG/PRODUCT NER          (uses shared singleton, ~0ms after first load)
+        3. Embedding similarity fallback   (only for very sparse text)
 
-        Returns deduplicated list of ExtractedSkill.
+        Safe to call concurrently — all heavy objects are module-level singletons.
         """
         t0 = time.time()
-        self._load_spacy()
+
+        # Uses shared module-level model — does NOT reload spaCy
+        nlp = _get_nlp()
 
         found: dict[str, ExtractedSkill] = {}
 
@@ -126,9 +169,9 @@ class ResumeParser:
                     entity_type=entity_type,
                 )
 
-        # ── Step 2: spaCy ORG entities as potential tech terms ────
-        if self._nlp and len(text) < 50000:
-            doc = self._nlp(text[:10000])  # cap at 10k chars to save memory
+        # ── Step 2: spaCy ORG/PRODUCT entities ───────────
+        if nlp and len(text) < 50000:
+            doc = nlp(text[:10000])  # cap to save memory
             for ent in doc.ents:
                 if ent.label_ in ("ORG", "PRODUCT"):
                     name = ent.text.strip()
@@ -141,35 +184,33 @@ class ResumeParser:
                             entity_type="TECH",
                         )
 
-        # ── Step 3: Embedding similarity for short texts ──
-        # Only run if regex found very few skills (sparse text)
+        # ── Step 3: Embedding fallback (sparse text only) ─
         if len(found) < 3 and len(text) > 50:
             try:
                 words = list({
                     w.strip(".,;:()")
                     for w in text.split()
                     if len(w) > 3
-                })[:80]  # cap candidates to save memory
+                })[:80]
 
                 if words:
                     import numpy as np
                     word_embs = self._emb.embed(words)
-                    if self._skill_embeddings is None:
-                        self._skill_embeddings = self._emb.embed(ALL_SKILLS)
-                    sims = (word_embs @ self._skill_embeddings.T)  # (words, skills)
-                    best_skill_idx = sims.argmax(axis=1)
-                    best_scores = sims.max(axis=1)
-
-                    for i, score in enumerate(best_scores):
-                        if float(score) >= 0.88:
-                            skill = ALL_SKILLS[best_skill_idx[i]]
-                            if skill not in found:
-                                found[skill] = ExtractedSkill(
-                                    name=skill,
-                                    confidence=round(float(score), 3),
-                                    source=source,
-                                    entity_type="TECH" if skill in TECH_SKILLS else "SOFT",
-                                )
+                    skill_embs = _get_skill_embeddings()  # cached module-level
+                    if skill_embs is not None:
+                        sims = word_embs @ skill_embs.T
+                        best_skill_idx = sims.argmax(axis=1)
+                        best_scores = sims.max(axis=1)
+                        for i, score in enumerate(best_scores):
+                            if float(score) >= 0.88:
+                                skill = ALL_SKILLS[best_skill_idx[i]]
+                                if skill not in found:
+                                    found[skill] = ExtractedSkill(
+                                        name=skill,
+                                        confidence=round(float(score), 3),
+                                        source=source,
+                                        entity_type="TECH" if skill in TECH_SKILLS else "SOFT",
+                                    )
             except Exception as e:
                 logger.warning("resume_parser.embedding_fallback_failed: %s", e)
 
@@ -178,5 +219,4 @@ class ResumeParser:
             "resume_parser.parse source=%s skills=%d elapsed_ms=%d",
             source, len(found), elapsed_ms,
         )
-
         return list(found.values())
