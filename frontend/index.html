@@ -3833,6 +3833,7 @@
             console.log("data.role from backend:", data.role);   // ← add this
             console.log("frontend role var:", role);   
             _sessionId = data.session_id;
+             role = quizState.role;
             _injectBackendData(data);
             if (atimer) { clearInterval(atimer); atimer = null; }
             showResult();
