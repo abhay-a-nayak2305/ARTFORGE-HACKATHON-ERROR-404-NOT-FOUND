@@ -23,11 +23,23 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
+def _parse_bool(value) -> bool:
+    """
+    Safely coerce FormData boolean values to Python bool.
+    FastAPI receives use_demo as the STRING "false" or "true" from
+    multipart/form-data. In Python, bool("false") == True, so we
+    must handle string coercion explicitly.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "0", "no", "")
+
+
 @router.post("/analyze/stream")
 async def analyze_stream(
     role: Annotated[str, Form()],
     experience_level: Annotated[str, Form()],
-    use_demo: Annotated[bool, Form()] = False,
+    use_demo: Annotated[str, Form()] = "false",
     resume_file: Optional[UploadFile] = File(None),
     jd_file: Optional[UploadFile] = File(None),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
@@ -50,7 +62,7 @@ async def analyze_stream(
                 experience_level=experience_level,
                 resume_file=resume_file,
                 jd_file=jd_file,
-                use_demo=use_demo,
+                use_demo=_parse_bool(use_demo),
             )
             yield f"data: {json.dumps({'done': True, 'result': result.model_dump()})}\n\n"
         except Exception as e:
@@ -61,7 +73,7 @@ async def analyze_stream(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",       # important for Render/nginx proxies
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -70,14 +82,20 @@ async def analyze_stream(
 async def analyze(
     role: Annotated[str, Form()],
     experience_level: Annotated[str, Form()],
-    use_demo: Annotated[bool, Form()] = False,
+    use_demo: Annotated[str, Form()] = "false",   # ← str, not bool (FormData sends strings)
     resume_file: Optional[UploadFile] = File(None),
     jd_file: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
+    # ── Coerce use_demo to a real Python bool ─────────────
+    # FormData always sends strings. bool("false") == True in Python,
+    # so we MUST parse explicitly. This was the root cause of the bug
+    # where quiz answers were ignored and demo data was always used.
+    use_demo_bool = _parse_bool(use_demo)
+
     # ── Resolve resume text ───────────────────────────────
-    if use_demo or resume_file is None:
+    if use_demo_bool or resume_file is None:
         resume_text = get_demo_resume()
         used_demo = True
     else:
@@ -92,7 +110,7 @@ async def analyze(
         used_demo = False
 
     # ── Resolve JD text ───────────────────────────────────
-    if use_demo or jd_file is None:
+    if use_demo_bool or jd_file is None:
         jd_text = get_demo_jd(role)
     else:
         raw = await jd_file.read()
