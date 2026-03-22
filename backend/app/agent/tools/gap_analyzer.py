@@ -32,74 +32,45 @@ class GapAnalyzer:
     def __init__(self):
         self._emb = EmbeddingService.get()
 
-    def analyze(
-        self,
-        resume_skills: list[ExtractedSkill],
-        jd_skills: list[ExtractedSkill],
-    ) -> tuple[list[str], list[str], list[str], list[SkillGapItem]]:
-        """
-        Returns (known, partial, gaps, gap_detail_list).
-
-        known   — skill names the candidate already has
-        partial — skill names with partial coverage
-        gaps    — skill names that are completely missing
-        gap_detail_list — full SkillGapItem objects for each JD skill
-        """
-        t0 = time.time()
-
+    def analyze(self, resume_skills, jd_skills):
+        resume_names_lower = {s.name.lower() for s in resume_skills}
         resume_names = [s.name for s in resume_skills]
-        jd_names = [s.name for s in jd_skills]
+    
+        known, partial, gaps = [], [], []
+        details = []
 
-        if not resume_names or not jd_names:
-            logger.warning("gap_analyzer.analyze: empty skill lists")
-            return [], [], jd_names, []
-
-        # Compute full similarity matrix (|resume| × |jd|)
-        sim_matrix = self._emb.similarity(resume_names, jd_names)
-        # Best resume match for each JD skill  shape: (|jd|,)
-        best_scores = sim_matrix.max(axis=0)  # max over resume axis
-
-        known: list[str] = []
-        partial: list[str] = []
-        gaps: list[str] = []
-        details: list[SkillGapItem] = []
-
-        for idx, jd_skill in enumerate(jd_skills):
-            score = float(best_scores[idx])
-            jd_weight = jd_skill.confidence
-
-            if score >= KNOWN_THRESHOLD:
-                classification = "known"
+        for jd_skill in jd_skills:
+            name_lower = jd_skill.name.lower()
+        
+            # Exact match → known
+            if name_lower in resume_names_lower:
                 known.append(jd_skill.name)
-                priority = "LOW"
-            elif score >= PARTIAL_THRESHOLD:
-                classification = "partial"
+                classification = "known"
+                score = 1.0
+            # Partial word match → partial  
+            elif any(
+                name_lower in r.lower() or r.lower() in name_lower
+                for r in resume_names
+            ):
                 partial.append(jd_skill.name)
-                priority = "LOW"
+                classification = "partial"
+                score = 0.6
+            # No match → gap
             else:
-                classification = "gap"
                 gaps.append(jd_skill.name)
-                priority = "HIGH" if jd_weight >= 0.85 else "MED"
+                classification = "gap"
+                score = 0.1
 
-            gap_magnitude = max(0.0, KNOWN_THRESHOLD - score)
+            priority = "HIGH" if jd_skill.confidence >= 0.85 and classification == "gap" else "MED" if classification == "gap" else "LOW"
+        
+            details.append(SkillGapItem(
+                skill=jd_skill.name,
+                resume_score=round(score, 3),
+                jd_weight=round(jd_skill.confidence, 3),
+                gap_magnitude=round(max(0.0, 0.78 - score), 3),
+                priority=priority,
+                onet_verified=True,
+            ))
 
-            details.append(
-                SkillGapItem(
-                    skill=jd_skill.name,
-                    resume_score=round(score, 3),
-                    jd_weight=round(jd_weight, 3),
-                    gap_magnitude=round(gap_magnitude, 3),
-                    priority=priority if classification == "gap" else "LOW",
-                    onet_verified=True,
-                )
-            )
-
-        elapsed_ms = int((time.time() - t0) * 1000)
-        logger.info(
-            "gap_analyzer.analyze",
-            known=len(known),
-            partial=len(partial),
-            gaps=len(gaps),
-            elapsed_ms=elapsed_ms,
-        )
+        logger.info("gap_analyzer.analyze known=%d partial=%d gaps=%d", len(known), len(partial), len(gaps))
         return known, partial, gaps, details
