@@ -47,9 +47,10 @@ class PathwayEdge(BaseModel):
 # ── Reasoning trace ───────────────────────────────────────
 
 class TraceStep(BaseModel):
-    name: str
-    input_summary: str
-    output_summary: str
+    name: str = ""                    # FIX: make optional with default
+    step_number: int = 0              # FIX: add missing field
+    input_summary: str = ""
+    output_summary: str = ""
     details: list[str] = Field(default_factory=list)
     confidence: float = 0.95
     elapsed_ms: int = 0
