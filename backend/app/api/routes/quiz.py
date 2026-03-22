@@ -5,9 +5,18 @@ FIX: Route ordering corrected. /quiz/submit and /quiz/generate must be declared
      BEFORE /quiz/{role}, otherwise FastAPI's top-down route matching treats
      "submit" and "generate" as a {role} path parameter.
 
-FIX: /quiz/generate now correctly annotates `role` as Query(...) instead of
-     relying on it being inferred from the function signature, which caused
-     FastAPI to look for it in the request body.
+FIX: /quiz/generate now correctly annotates `role` as Query(...).
+
+FIX: _scores_to_resume now OMITS gap/weak skills from the synthetic resume
+     entirely. Previously, skills scored 0.0 were listed as "Not yet explored"
+     which caused the regex-based resume_parser to match those skill names and
+     mark them as KNOWN — so the gap analyzer found zero gaps regardless of
+     how low the quiz scores were.
+
+     New rule:
+       score >= 0.65 → SKILLS section        (known, matched by parser as proficient)
+       score >= 0.25 → SOME EXPOSURE section  (partial, prefixed to reduce parser hits)
+       score <  0.25 → NOT in resume at all   (parser never sees them → becomes gaps)
 """
 
 import json
@@ -385,68 +394,88 @@ def _scores_to_resume(
     role: str,
     experience_level: str,
 ) -> tuple[str, dict[str, float]]:
+    """
+    Convert quiz answers into a synthetic resume + skill profile.
+
+    THE KEY FIX: Skills scored below 0.25 are completely omitted from the
+    resume text. The resume_parser uses regex to detect skill names — if we
+    write "Docker: Not yet explored", the regex still matches "Docker" and
+    marks it as a known skill, giving zero gaps regardless of quiz scores.
+
+    By omitting low-score skills entirely, the gap analyzer correctly identifies
+    them as absent from the resume and flags them as gaps.
+
+    Thresholds:
+        score >= 0.65  → SKILLS section         (known/proficient)
+        score >= 0.25  → SOME EXPOSURE section   (partial, prefixed to reduce regex hits)
+        score <  0.25  → omitted entirely        (becomes a gap in the analysis)
+    """
     skill_profile: dict[str, float] = {}
-    advanced_skills: list[str] = []
-    intermediate_skills: list[str] = []
-    basic_skills: list[str] = []
-    no_skills: list[str] = []
+    proficient_skills: list[str] = []
+    partial_skills: list[str] = []
+    # skills below 0.25 go nowhere — intentionally excluded
 
     for answer in answers:
         skill_profile[answer.skill] = answer.score
-        if answer.score >= 0.85:
-            advanced_skills.append(answer.skill)
-        elif answer.score >= 0.55:
-            intermediate_skills.append(answer.skill)
+        if answer.score >= 0.65:
+            proficient_skills.append(answer.skill)
         elif answer.score >= 0.25:
-            basic_skills.append(answer.skill)
-        else:
-            no_skills.append(answer.skill)
+            partial_skills.append(answer.skill)
 
-    level_label = {"beginner": "Entry-Level", "mid": "Mid-Level", "senior": "Senior"}.get(experience_level, "Professional")
-    years = {"beginner": "1 year", "mid": "3 years", "senior": "7 years"}.get(experience_level, "3 years")
+    level_label = {
+        "beginner": "Entry-Level",
+        "mid": "Mid-Level",
+        "senior": "Senior",
+    }.get(experience_level, "Professional")
+
+    years = {
+        "beginner": "1 year",
+        "mid": "3 years",
+        "senior": "7 years",
+    }.get(experience_level, "3 years")
 
     lines: list[str] = [
-        "DIAGNOSTIC ASSESSMENT PROFILE",
-        f"Role Target: {role}",
-        f"Experience Level: {level_label} ({years} estimated)",
-        f"Assessment Date: {datetime.utcnow().strftime('%B %Y')}",
+        f"{level_label} {role}",
+        f"Experience: approximately {years}",
         "",
     ]
 
-    if advanced_skills:
-        lines.append("EXPERT PROFICIENCY:")
-        for s in advanced_skills:
-            lines.append(f"  - {s}: Advanced")
-    if intermediate_skills:
-        lines.append("\nWORKING PROFICIENCY:")
-        for s in intermediate_skills:
-            lines.append(f"  - {s}: Intermediate")
-    if basic_skills:
-        lines.append("\nFOUNDATIONAL KNOWLEDGE:")
-        for s in basic_skills:
-            lines.append(f"  - {s}: Basic")
-    if no_skills:
-        lines.append("\nAREAS FOR DEVELOPMENT:")
-        for s in no_skills:
-            lines.append(f"  - {s}: Not yet explored")
+    # Only proficient skills appear as bare skill names — parser will match these
+    if proficient_skills:
+        lines.append("SKILLS:")
+        lines.append(", ".join(proficient_skills))
+        lines.append("")
 
-    lines.append(f"\nEXPERIENCE SUMMARY: {level_label} {role} with approximately {years} of experience.")
+    # Partial skills are prefixed with "basic" so they appear in the resume
+    # but are harder for the regex to match as fully-known skills
+    if partial_skills:
+        lines.append("SOME EXPOSURE TO:")
+        lines.append(", ".join(f"basic {s}" for s in partial_skills))
+        lines.append("")
 
-    return "\n".join(lines), skill_profile
+    lines.append(
+        f"SUMMARY: {level_label} professional targeting the {role} role "
+        f"with approximately {years} of relevant experience."
+    )
+
+    resume_text = "\n".join(lines)
+
+    gap_count = len(answers) - len(proficient_skills) - len(partial_skills)
+    logger.info(
+        "quiz.synthetic_resume role=%s proficient=%d partial=%d gaps_omitted=%d",
+        role, len(proficient_skills), len(partial_skills), gap_count,
+    )
+
+    return resume_text, skill_profile
 
 
 # ═══════════════════════════════════════════════════════════
 # API ENDPOINTS
-# FIX: Static routes (/quiz/submit, /quiz/generate, /quiz/roles/list)
-#      MUST come before the dynamic /quiz/{role} route.
-#      FastAPI matches routes in declaration order, so without this fix
-#      "submit", "generate", and "roles" would be captured as {role} values
-#      and incorrectly hit the GET /quiz/{role} handler.
+# Static routes MUST come before /quiz/{role}
 # ═══════════════════════════════════════════════════════════
 
 @router.get("/quiz/roles/list")
 async def list_supported_roles():
-    """Return all roles that support quiz mode."""
     return {
         "roles": SUPPORTED_ROLES,
         "levels": SUPPORTED_LEVELS,
@@ -456,10 +485,6 @@ async def list_supported_roles():
 
 @router.post("/quiz/submit", response_model=QuizResult)
 async def submit_quiz(submission: QuizSubmission):
-    """
-    Process quiz answers and return skill profile + synthetic resume.
-    Accepts JSON body (Content-Type: application/json).
-    """
     if not submission.answers:
         raise HTTPException(status_code=422, detail="No answers provided.")
     if submission.role not in SUPPORTED_ROLES:
@@ -472,7 +497,7 @@ async def submit_quiz(submission: QuizSubmission):
     )
 
     strong = [s for s, score in skill_profile.items() if score >= 0.65]
-    weak = [s for s, score in skill_profile.items() if score < 0.35]
+    weak   = [s for s, score in skill_profile.items() if score < 0.35]
 
     avg_score = sum(skill_profile.values()) / len(skill_profile) if skill_profile else 0.0
     if avg_score >= 0.75:
@@ -484,8 +509,14 @@ async def submit_quiz(submission: QuizSubmission):
     else:
         estimated_experience = "Beginner (career switcher)"
 
-    logger.info("quiz.submitted", role=submission.role, level=submission.experience_level,
-                strong_count=len(strong), weak_count=len(weak), avg_score=round(avg_score, 2))
+    logger.info(
+        "quiz.submitted",
+        role=submission.role,
+        level=submission.experience_level,
+        strong_count=len(strong),
+        weak_count=len(weak),
+        avg_score=round(avg_score, 2),
+    )
 
     return QuizResult(
         synthetic_resume=synthetic_resume,
@@ -503,13 +534,10 @@ async def submit_quiz(submission: QuizSubmission):
 
 @router.post("/quiz/generate", response_model=GeneratedQuiz)
 async def force_generate_quiz(
-    # FIX: role must be annotated as Query(...) so FastAPI reads it from the
-    # query string. Without Query(), FastAPI assumes it's a request body field.
     role: str = Query(..., description="Job role to generate quiz for"),
     experience_level: str = Query(default="mid", enum=SUPPORTED_LEVELS),
     num_questions: int = Query(default=10, ge=5, le=15),
 ):
-    """Force-regenerate a quiz bypassing the cache."""
     return await get_quiz(
         role=role,
         experience_level=experience_level,
@@ -518,8 +546,6 @@ async def force_generate_quiz(
     )
 
 
-# FIX: This dynamic route is declared LAST so it doesn't swallow
-#      /quiz/submit, /quiz/generate, and /quiz/roles/list.
 @router.get("/quiz/{role}", response_model=GeneratedQuiz)
 async def get_quiz(
     role: str,
@@ -527,7 +553,6 @@ async def get_quiz(
     num_questions: int = Query(default=10, ge=5, le=15),
     force_regenerate: bool = Query(default=False),
 ):
-    """Get a dynamically generated quiz for a role and experience level."""
     if role not in SUPPORTED_ROLES:
         raise HTTPException(
             status_code=400,
@@ -566,8 +591,13 @@ async def get_quiz(
         "groq_model": groq_model,
     }
 
-    logger.info("quiz.generated", role=role, level=experience_level,
-                questions=len(questions), groq=groq_model)
+    logger.info(
+        "quiz.generated",
+        role=role,
+        level=experience_level,
+        questions=len(questions),
+        groq=groq_model,
+    )
 
     return GeneratedQuiz(
         role=role,
