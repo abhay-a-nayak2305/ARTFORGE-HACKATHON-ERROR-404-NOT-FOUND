@@ -3084,14 +3084,18 @@
         document.getElementById('res-role').textContent = role;
         var ft = document.getElementById('tab-btn-pathway');
         ft.classList.add('on'); ft.style.color = '#fff'; ft.style.borderBottomColor = c;
-        var gc = d.nodes.filter(function (n) { return n.t === 'gap'; }).length;
-        var td = d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0);
-        renderStats([
-            { icon: '⚠', val: gc, sfx: '', lbl: 'Skill Gaps', col: '#ff4fd8', dl: .08 },
-            { icon: '📅', val: td, sfx: 'd', lbl: 'Training Days', col: c, dl: .15 },
-            { icon: '⚡', val: d.saved, sfx: 'd', lbl: 'Days Saved', col: '#00e5b8', dl: .22 },
-            { icon: '🎯', val: d.score, sfx: '%', lbl: 'Match Score', col: '#e8ff47', dl: .29 }
-        ]);
+        // Use real backend data if available, fall back to local ROLES data
+var raw = d._raw || {};
+var gc = raw.gap_skills ? raw.gap_skills.length : d.nodes.filter(function (n) { return n.t === 'gap'; }).length;
+var td = raw.total_training_days || d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0);
+var saved = raw.days_saved !== undefined ? raw.days_saved : d.saved;
+var score = raw.match_score !== undefined ? raw.match_score : d.score;
+renderStats([
+    { icon: '⚠', val: gc, sfx: '', lbl: 'Skill Gaps', col: '#ff4fd8', dl: .08 },
+    { icon: '📅', val: td, sfx: 'd', lbl: 'Training Days', col: c, dl: .15 },
+    { icon: '⚡', val: saved, sfx: 'd', lbl: 'Days Saved', col: '#00e5b8', dl: .22 },
+    { icon: '🎯', val: score, sfx: '%', lbl: 'Match Score', col: '#e8ff47', dl: .29 }
+]);
         renderGraphD3(d, c); renderSkillGaps(d, c); renderRadar(d, c); renderTimeline(d, c); renderTrace(d, c);
         setTimeout(function () { renderPlanner(parseInt(document.getElementById('hrs-slider').value) || 3); }, 100);
         setTimeout(function () {
