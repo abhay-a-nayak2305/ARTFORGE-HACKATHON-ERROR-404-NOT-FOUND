@@ -24,19 +24,13 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup ───────────────────────────────────────────
     logger.info("pathforge.startup version=%s", settings.APP_VERSION)
-
-    # Lazy import: if DB/Groq init fails, at least the app boots
     from app.dependencies import init_db
     await init_db()
-
     from app.agent.groq_client import GroqClient
     groq = GroqClient.get()
     logger.info("pathforge.groq_ready available=%s", groq.available)
-
     yield
-
     logger.info("pathforge.shutdown")
 
 
