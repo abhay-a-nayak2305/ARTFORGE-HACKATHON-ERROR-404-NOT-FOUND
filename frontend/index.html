@@ -3816,7 +3816,7 @@
         const formData = new FormData();
         formData.append('role', quizState.role);
         formData.append('experience_level', quizState.level);
-        formData.append('use_demo', 'true');
+        formData.append('use_demo', 'false');
         formData.append('resume_file', new Blob([syntheticResume], { type: 'text/plain' }), 'quiz_assessment.txt');
         try {
             const res = await fetchWithRetry(`${API_BASE}/analyze`, { method: 'POST', body: formData });
