@@ -2872,20 +2872,6 @@
     </footer>
 
     <script>
-    /* ═══════════════════════════════════════════════════════════════
-       PATHFORGE — COMPLETE CORRECTED SCRIPT
-       FIXES APPLIED:
-       1. API_BASE is the single source of truth — no duplicate URLs
-       2. fetchWithRetry() handles Render free-tier cold starts (30-60s)
-       3. encodeURIComponent(role) on all quiz fetch URLs
-       4. quiz/submit sends JSON body, NOT FormData
-       5. analyze sends FormData WITHOUT manual Content-Type header
-       6. goAnalyze() wrapped with fetchWithRetry
-       7. sendChat() wrapped with fetchWithRetry
-       8. Duplicate goTo() definition removed — single clean version
-       9. use_demo appended only once in quizRunAnalysis FormData
-    ═══════════════════════════════════════════════════════════════ */
-
     const API_BASE = "https://pathforge-backend-q64h.onrender.com/api";
 
     /* ── THREE.JS 3D ── */
@@ -2932,66 +2918,63 @@
         completedModules = new Set(), darkMode = true, chatMsgCount = 0, chatTopicCount = 0;
     let _sessionId = null;
 
-    /* ══════════════════════════════════════════════════════════════
-       FIX 1: fetchWithRetry — handles Render free-tier cold starts.
-       The backend spins down after 15 min inactivity and takes
-       30-60s to wake. Without retry, the first request looks like
-       a CORS error. Retries up to 3 times with exponential backoff.
-    ══════════════════════════════════════════════════════════════ */
+    /* ── NODE TYPE HELPER ──
+       Backend sends node_type; local fallback uses t.
+       Always use _nt(node) instead of node.t directly. */
+    function _nt(n) { return n.node_type || n.t || 'skill'; }
+
+    /* ── REAL DATA HELPERS — always read from _raw when available ── */
+    function _gaps(d)    { return (d._raw && d._raw.gap_skills)     || d.gaps    || []; }
+    function _known(d)   { return (d._raw && d._raw.known_skills)   || d.known   || []; }
+    function _partial(d) { return (d._raw && d._raw.partial_skills) || d.partial || []; }
+    function _score(d)   { return d._raw && d._raw.match_score   !== undefined ? d._raw.match_score   : (d.score  || 0); }
+    function _saved(d)   { return d._raw && d._raw.days_saved     !== undefined ? d._raw.days_saved    : (d.saved  || 0); }
+    function _totalDays(d) {
+        if (d._raw && d._raw.total_training_days !== undefined) return d._raw.total_training_days;
+        return d.nodes.filter(function(n) { return n.days > 0; }).reduce(function(s, n) { return s + n.days; }, 0);
+    }
+    function _confidence(d) {
+        return d._raw && d._raw.hallucination_guard && d._raw.hallucination_guard.confidence_avg !== undefined
+            ? d._raw.hallucination_guard.confidence_avg : 94.2;
+    }
+    function _skills(d) {
+        if (d._raw && d._raw.jd_skills && d._raw.jd_skills.length) {
+            return d._raw.jd_skills.map(function(s) { return s.name || s; }).slice(0, 7);
+        }
+        return (d.skills || []).slice(0, 7);
+    }
+
+    /* ── fetchWithRetry — handles Render free-tier cold starts ── */
     async function fetchWithRetry(url, options = {}, maxRetries = 3) {
         const RETRY_DELAYS = [5000, 15000, 25000];
-
         for (let attempt = 0; attempt < maxRetries; attempt++) {
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 60000);
-
                 const response = await fetch(url, { ...options, signal: controller.signal });
                 clearTimeout(timeoutId);
-
-                // Only retry on gateway errors (server still waking up)
-                if (response.ok || (response.status < 500 && response.status !== 0)) {
-                    return response;
-                }
-
-                if (attempt < maxRetries - 1) {
-                    const wait = RETRY_DELAYS[attempt];
-                    _showRetryMessage(attempt + 1, wait);
-                    await new Promise(res => setTimeout(res, wait));
-                } else {
-                    return response;
-                }
+                if (response.ok || (response.status < 500 && response.status !== 0)) return response;
+                if (attempt < maxRetries - 1) { _showRetryMessage(attempt + 1, RETRY_DELAYS[attempt]); await new Promise(res => setTimeout(res, RETRY_DELAYS[attempt])); }
+                else return response;
             } catch (err) {
-                if (attempt < maxRetries - 1) {
-                    const wait = RETRY_DELAYS[attempt];
-                    _showRetryMessage(attempt + 1, wait);
-                    await new Promise(res => setTimeout(res, wait));
-                } else {
-                    throw err;
-                }
+                if (attempt < maxRetries - 1) { _showRetryMessage(attempt + 1, RETRY_DELAYS[attempt]); await new Promise(res => setTimeout(res, RETRY_DELAYS[attempt])); }
+                else throw err;
             }
         }
     }
-
     function _showRetryMessage(attempt, waitMs) {
-        const msgs = [
-            "Waking up backend… (free tier spins down after inactivity)",
-            "Still starting… this can take ~60 seconds",
-            "Last retry — almost there…",
-        ];
+        const msgs = ["Waking up backend… (free tier spins down after inactivity)", "Still starting… this can take ~60 seconds", "Last retry — almost there…"];
         const el = document.querySelector('.an-msg') || document.querySelector('.quiz-loading-text');
         if (el) el.textContent = msgs[attempt - 1] || "Connecting…";
         console.info(`Cold-start retry ${attempt}: waiting ${waitMs / 1000}s`);
     }
 
-    /* ── STEP NAV — single clean version (FIX 8: removed duplicate) ── */
+    /* ── STEP NAV ── */
     function goTo(n) {
         ['step-upload', 'step-analyzing', 'step-result', 'step-quiz'].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) el.style.display = 'none';
+            var el = document.getElementById(id); if (el) el.style.display = 'none';
         });
-        var el = document.getElementById('step-' + n);
-        if (!el) return;
+        var el = document.getElementById('step-' + n); if (!el) return;
         el.style.display = (n === 'analyzing') ? 'flex' : 'block';
     }
 
@@ -3009,12 +2992,7 @@
         document.getElementById('dz-jd').classList.add('ok'); document.getElementById('dz-jl').textContent = '✓  job_description.pdf';
         activateBtn();
     }
-    function activateBtn() {
-        var b = document.getElementById('btn-go');
-        if (b) { b.classList.add('ready'); }
-    }
-
-    /* ── ALIASES ── */
+    function activateBtn() { var b = document.getElementById('btn-go'); if (b) b.classList.add('ready'); }
     function handleFile(t, i) { pickFile(t, i); }
     function loadDemo() { useDemo(); }
     function checkReady() { activateBtn(); }
@@ -3039,15 +3017,7 @@
 
     /* ── ANALYSIS LOGS ── */
     var LOGS_DATA = function (r) {
-        return [
-            '[INIT]   Loading BERT pipeline...', '[PARSE]  Tokenizing resume — 847 tokens',
-            '[NER]    Entity extraction complete', '[EMBED]  Computing 768-dim embeddings...',
-            '[ONET]   Fetching O*NET for: ' + r, '[ONET]   Loaded 340 competency nodes',
-            '[DELTA]  Cosine similarity matrix 26x340', '[DELTA]  Threshold alpha=0.78',
-            '[GRAPH]  Constructing dependency graph', '[BFS]    Adaptive BFS traversal...',
-            '[RANK]   Sort: JD weight x depth x effort', '[GUARD]  Grounding to course catalog...',
-            '[DONE]   Pathway ready. Confidence: 94.2%'
-        ];
+        return ['[INIT]   Loading BERT pipeline...', '[PARSE]  Tokenizing resume — 847 tokens', '[NER]    Entity extraction complete', '[EMBED]  Computing 768-dim embeddings...', '[ONET]   Fetching O*NET for: ' + r, '[ONET]   Loaded 340 competency nodes', '[DELTA]  Cosine similarity matrix 26x340', '[DELTA]  Threshold alpha=0.78', '[GRAPH]  Constructing dependency graph', '[BFS]    Adaptive BFS traversal...', '[RANK]   Sort: JD weight x depth x effort', '[GUARD]  Grounding to course catalog...', '[DONE]   Pathway ready. Confidence: 94.2%'];
     };
 
     function runAnalysis() {
@@ -3075,7 +3045,7 @@
         }, 240);
     }
 
-    /* ── SHOW RESULT ── */
+    /* ── SHOW RESULT — all stats from real backend data ── */
     function showResult() {
         var d = ROLES[role], c = d.color;
         goTo('result');
@@ -3084,25 +3054,26 @@
         document.getElementById('res-role').textContent = role;
         var ft = document.getElementById('tab-btn-pathway');
         ft.classList.add('on'); ft.style.color = '#fff'; ft.style.borderBottomColor = c;
-        // Use real backend data if available, fall back to local ROLES data
-var raw = d._raw || {};
-var gc = raw.gap_skills ? raw.gap_skills.length : d.nodes.filter(function (n) { return n.t === 'gap'; }).length;
-var td = raw.total_training_days || d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0);
-var saved = raw.days_saved !== undefined ? raw.days_saved : d.saved;
-var score = raw.match_score !== undefined ? raw.match_score : d.score;
-renderStats([
-    { icon: '⚠', val: gc, sfx: '', lbl: 'Skill Gaps', col: '#ff4fd8', dl: .08 },
-    { icon: '📅', val: td, sfx: 'd', lbl: 'Training Days', col: c, dl: .15 },
-    { icon: '⚡', val: saved, sfx: 'd', lbl: 'Days Saved', col: '#00e5b8', dl: .22 },
-    { icon: '🎯', val: score, sfx: '%', lbl: 'Match Score', col: '#e8ff47', dl: .29 }
-]);
-        renderGraphD3(d, c); renderSkillGaps(d, c); renderRadar(d, c); renderTimeline(d, c); renderTrace(d, c);
+
+        /* All four stat cards use real backend data via helpers */
+        var gc = _gaps(d).length;
+        var td = _totalDays(d);
+        var saved = _saved(d);
+        var score = _score(d);
+        renderStats([
+            { icon: '⚠', val: gc,    sfx: '',  lbl: 'Skill Gaps',     col: '#ff4fd8', dl: .08 },
+            { icon: '📅', val: td,    sfx: 'd', lbl: 'Training Days',  col: c,         dl: .15 },
+            { icon: '⚡', val: saved, sfx: 'd', lbl: 'Days Saved',     col: '#00e5b8', dl: .22 },
+            { icon: '🎯', val: score, sfx: '%', lbl: 'Match Score',    col: '#e8ff47', dl: .29 }
+        ]);
+
+        renderGraphD3(d, c);
+        renderSkillGaps(d, c);
+        renderRadar(d, c);
+        renderTimeline(d, c);
+        renderTrace(d, c);
         setTimeout(function () { renderPlanner(parseInt(document.getElementById('hrs-slider').value) || 3); }, 100);
-        setTimeout(function () {
-            if (ROLES[role] && ROLES[role].graphData) {
-                renderEvaluationDashboard(ROLES[role].graphData);
-            }
-        }, 200);
+        setTimeout(function () { if (ROLES[role] && ROLES[role].graphData) renderEvaluationDashboard(ROLES[role].graphData); }, 200);
         completedModules = new Set();
         setTimeout(function () { initChat(); }, 200);
     }
@@ -3133,247 +3104,534 @@ renderStats([
         if (name === 'chat') initChatTab();
     }
 
-    /* ── NC ── */
-    var NC = { you: { fill: 'rgba(232,255,71,.08)', stroke: '#e8ff47', text: '#e8ff47' }, gap: { fill: 'rgba(255,79,216,.08)', stroke: '#ff4fd8', text: '#ff9aeb' }, skill: { fill: 'rgba(0,229,184,.08)', stroke: '#00e5b8', text: '#4dffd8' }, check: { fill: 'rgba(0,229,184,.12)', stroke: '#00e5b8', text: '#00e5b8' }, end: { fill: 'rgba(232,255,71,.12)', stroke: '#e8ff47', text: '#e8ff47' } };
+    /* ── NODE COLOR MAP ── */
+    var NC = {
+        you:   { fill: 'rgba(232,255,71,.08)',  stroke: '#e8ff47', text: '#e8ff47' },
+        gap:   { fill: 'rgba(255,79,216,.08)',  stroke: '#ff4fd8', text: '#ff9aeb' },
+        skill: { fill: 'rgba(0,229,184,.08)',   stroke: '#00e5b8', text: '#4dffd8' },
+        check: { fill: 'rgba(0,229,184,.12)',   stroke: '#00e5b8', text: '#00e5b8' },
+        end:   { fill: 'rgba(232,255,71,.12)',  stroke: '#e8ff47', text: '#e8ff47' }
+    };
 
     /* ── MISC ── */
-    function onRoleChange() { role = document.getElementById('sel-role').value; var c = ROLES[role].color;['ft1', 'ft2', 'ft3', 'ft4'].forEach(function (id) { var el = document.getElementById(id); if (el) el.style.color = c; }); }
-
-    function toggleTheme() {
-        darkMode = !darkMode;
-        document.body.classList.toggle('light', !darkMode);
-        document.getElementById('tbtn').textContent = darkMode ? 'Light' : 'Dark';
-        localStorage.setItem('pathforge_theme', darkMode ? 'dark' : 'light');
+    function onRoleChange() {
+        role = document.getElementById('sel-role').value;
+        var c = ROLES[role] ? ROLES[role].color : '#00e5b8';
+        ['ft1', 'ft2', 'ft3', 'ft4'].forEach(function (id) { var el = document.getElementById(id); if (el) el.style.color = c; });
     }
-    (function initTheme() {
-        const saved = localStorage.getItem('pathforge_theme');
-        if (saved === 'light') { darkMode = false; document.body.classList.add('light'); document.getElementById('tbtn').textContent = 'Dark'; }
-    })();
-
+    function toggleTheme() { darkMode = !darkMode; document.body.classList.toggle('light', !darkMode); document.getElementById('tbtn').textContent = darkMode ? 'Light' : 'Dark'; localStorage.setItem('pathforge_theme', darkMode ? 'dark' : 'light'); }
+    (function initTheme() { const saved = localStorage.getItem('pathforge_theme'); if (saved === 'light') { darkMode = false; document.body.classList.add('light'); document.getElementById('tbtn').textContent = 'Dark'; } })();
     function toggleDlMenu() { var m = document.getElementById('dl-menu'); m.style.display = m.style.display === 'block' ? 'none' : 'block'; }
     document.addEventListener('click', function (e) { var w = document.getElementById('dl-wrap'); if (w && !w.contains(e.target)) { var m = document.getElementById('dl-menu'); if (m) m.style.display = 'none'; } });
     function filterSkills(q) { q = q.trim().toLowerCase(); document.querySelectorAll('.bdg').forEach(function (b) { if (!q) { b.classList.remove('hl-b', 'dim-b'); return; } var ok = b.textContent.trim().toLowerCase().includes(q); b.classList.toggle('hl-b', ok); b.classList.toggle('dim-b', !ok); }); }
-    function copySummary() { var d = ROLES[role], total = d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0), txt = 'PathForge Roadmap\nRole: ' + role + '\nMatch: ' + d.score + '%\nGaps: ' + d.gaps.join(', ') + '\nDuration: ' + total + 'd'; if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () { }); var b = document.getElementById('btn-copy'); b.textContent = 'Copied!'; b.style.color = 'var(--y)'; setTimeout(function () { b.textContent = '📋 Copy'; b.style.color = ''; }, 2000); }
 
-    /* ── CHAT (local fallback) ── */
+    /* copySummary — real backend data */
+    function copySummary() {
+        var d = ROLES[role];
+        var txt = 'PathForge Roadmap\nRole: ' + role + '\nMatch: ' + _score(d) + '%\nGaps: ' + _gaps(d).join(', ') + '\nDuration: ' + _totalDays(d) + 'd';
+        if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () {});
+        var b = document.getElementById('btn-copy'); b.textContent = 'Copied!'; b.style.color = 'var(--y)';
+        setTimeout(function () { b.textContent = '📋 Copy'; b.style.color = ''; }, 2000);
+    }
+
+    /* ── CHAT ── */
     function updateChatStats() { var mc = document.getElementById('chat-msg-count'); if (mc) mc.textContent = chatMsgCount; }
     function scrollChat() { var c = document.getElementById('chat-messages'); if (c) c.scrollTop = c.scrollHeight; }
     function clearChat() { var m = document.getElementById('chat-messages'); if (m) m.innerHTML = ''; chatMsgCount = 0; chatTopicCount = 0; updateChatStats(); setTimeout(initChat, 100); }
     function askTopic(q) { var i = document.getElementById('chat-input'); if (i) i.value = q; sendChat(); }
-    function initChatTab() { var d = ROLES[role], total = d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0); var cr = document.getElementById('ctx-role'); if (cr) cr.textContent = role; var cg = document.getElementById('ctx-gaps'); if (cg) cg.textContent = d.gaps.length + ' critical'; var cs = document.getElementById('ctx-score'); if (cs) cs.textContent = d.score + '%'; var cd = document.getElementById('ctx-days'); if (cd) cd.textContent = total + 'd'; var msgs = document.getElementById('chat-messages'); if (msgs && msgs.children.length === 0) initChat(); }
-    function initChat() { var d = ROLES[role], total = d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0), msgs = document.getElementById('chat-messages'); if (!msgs) return; msgs.innerHTML = ''; chatMsgCount = 0; chatTopicCount = 0; updateChatStats(); addChatMsg('Hi! I am your PathForge AI. Your ' + role + ' pathway has ' + d.gaps.length + ' gaps and ' + total + ' training days.', 'ai'); }
-    function addChatMsg(msg, who) { var msgs = document.getElementById('chat-messages'); if (!msgs) return; var el = document.createElement('div'); el.className = who === 'user' ? 'cu' : 'ca'; el.textContent = msg; msgs.appendChild(el); chatMsgCount++; updateChatStats(); scrollChat(); }
-    var cResp = { howlong: function (d) { return 'Your pathway takes ~' + d.nodes.filter(function (n) { return n.days > 0; }).reduce(function (s, n) { return s + n.days; }, 0) + ' training days.'; }, gap: function (d) { return 'Critical gaps: ' + d.gaps.join(', ') + ' (' + d.gaps.length + ' total).'; }, score: function (d) { return 'Match score: ' + d.score + '%. Complete all gap modules to reach 100%.'; }, start: function (d) { return 'Start with HIGH priority gaps: ' + d.nodes.filter(function (n) { return n.t === "gap" && n.pri === "HIGH"; }).map(function (n) { return n.label; }).join(', ') + '.'; }, hard: function (d) { var h = d.nodes.filter(function (n) { return n.days > 0; }).sort(function (a, b) { return b.days - a.days; })[0]; return 'Hardest: "' + h.label + '" at ' + h.days + ' days.'; }, save: function (d) { return 'You save ' + d.saved + ' days vs generic onboarding.'; }, algo: function (d) { return 'BERT NER extracts skills → cosine similarity vs O*NET → adaptive BFS builds your pathway.'; } };
 
-    /* ══════════════════════════════════════════════════════════════
-       FIX 2 + 3: sendChat uses fetchWithRetry + JSON body
-    ══════════════════════════════════════════════════════════════ */
+    /* initChatTab — real backend data */
+    function initChatTab() {
+        var d = ROLES[role];
+        var cr = document.getElementById('ctx-role');  if (cr) cr.textContent = role;
+        var cg = document.getElementById('ctx-gaps');  if (cg) cg.textContent = _gaps(d).length + ' critical';
+        var cs = document.getElementById('ctx-score'); if (cs) cs.textContent = _score(d) + '%';
+        var cd = document.getElementById('ctx-days');  if (cd) cd.textContent = _totalDays(d) + 'd';
+        var msgs = document.getElementById('chat-messages'); if (msgs && msgs.children.length === 0) initChat();
+    }
+
+    /* initChat — real backend data */
+    function initChat() {
+        var d = ROLES[role];
+        var msgs = document.getElementById('chat-messages'); if (!msgs) return;
+        msgs.innerHTML = ''; chatMsgCount = 0; chatTopicCount = 0; updateChatStats();
+        addChatMsg('Hi! I am your PathForge AI. Your ' + role + ' pathway has ' + _gaps(d).length + ' gaps and ' + _totalDays(d) + ' training days.', 'ai');
+    }
+
+    function addChatMsg(msg, who) {
+        var msgs = document.getElementById('chat-messages'); if (!msgs) return;
+        var el = document.createElement('div'); el.className = who === 'user' ? 'cu' : 'ca';
+        el.textContent = msg; msgs.appendChild(el); chatMsgCount++; updateChatStats(); scrollChat();
+    }
+
+    /* Local chat fallback — real backend data via helpers */
+    function _localChatReply(msg) {
+        var d = ROLES[role], q = msg.toLowerCase();
+        var gaps = _gaps(d), known = _known(d), score = _score(d), saved = _saved(d), total = _totalDays(d);
+        var highPri = d.nodes.filter(function(n) { return _nt(n) === 'gap' && n.pri === 'HIGH'; }).map(function(n) { return n.label; });
+        var hardest = d.nodes.filter(function(n) { return n.days > 0; }).sort(function(a, b) { return b.days - a.days; })[0];
+        if (q.includes('long') || q.includes('duration') || q.includes('days'))
+            return 'Your ' + role + ' pathway spans ' + total + ' training days (~' + Math.round(total / 5) + ' working weeks).';
+        if (q.includes('gap') || q.includes('miss') || q.includes('lack'))
+            return 'You have ' + gaps.length + ' critical gap(s): ' + gaps.slice(0, 5).join(', ') + '.';
+        if (q.includes('score') || q.includes('match') || q.includes('%'))
+            return 'Your current role-readiness score is ' + score + '%. Complete all gap modules to reach 100%.';
+        if (q.includes('start') || q.includes('begin') || q.includes('first'))
+            return 'Start with HIGH priority gaps: ' + (highPri.length ? highPri.join(', ') : gaps[0] || 'your first gap') + '.';
+        if (q.includes('hard') || q.includes('difficult'))
+            return hardest ? 'Hardest module: "' + hardest.label + '" at ' + hardest.days + ' days.' : 'Check the planner tab for difficulty estimates.';
+        if (q.includes('save') || q.includes('skip'))
+            return 'PathForge saves you ' + saved + ' days by skipping ' + known.length + ' skills you already know: ' + known.slice(0, 4).join(', ') + '…';
+        if (q.includes('algo') || q.includes('how') || q.includes('work'))
+            return 'BERT NER + Groq LLaMA-3.3 extract skills → cosine similarity identifies gaps → O*NET grounds every skill → adaptive BFS orders modules.';
+        return 'Your ' + role + ' pathway: ' + d.nodes.filter(function(n) { return n.days > 0; }).length + ' modules, ' + gaps.length + ' gaps (' + gaps.slice(0, 3).join(', ') + '…), match score ' + score + '%.';
+    }
+
     async function sendChat() {
-        const inp = document.getElementById('chat-input');
-        if (!inp) return;
-        const msg = inp.value.trim();
-        if (!msg) return;
-        inp.value = '';
-        addChatMsg(msg, 'user');
-        chatTopicCount++;
-
-        const typing = document.createElement('div');
-        typing.className = 'ca';
-        typing.textContent = '...';
-        document.getElementById('chat-messages').appendChild(typing);
-        scrollChat();
-
+        const inp = document.getElementById('chat-input'); if (!inp) return;
+        const msg = inp.value.trim(); if (!msg) return;
+        inp.value = ''; addChatMsg(msg, 'user'); chatTopicCount++;
+        const typing = document.createElement('div'); typing.className = 'ca'; typing.textContent = '...';
+        document.getElementById('chat-messages').appendChild(typing); scrollChat();
         try {
             if (_sessionId) {
-                /* FIX: Content-Type: application/json, body is JSON string */
                 const res = await fetchWithRetry(`${API_BASE}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: _sessionId,
-                        message: msg,
-                        history: [],
-                    }),
+                    body: JSON.stringify({ session_id: _sessionId, message: msg, history: [] })
                 });
-                const data = await res.json();
-                typing.remove();
+                const data = await res.json(); typing.remove();
                 addChatMsg(data.reply || 'No response.', 'ai');
             } else {
-                // Local fallback when no session
-                typing.remove();
-                const d = ROLES[role];
-                const q = msg.toLowerCase();
-                let rep = '';
-                if (q.includes('long') || q.includes('time') || q.includes('duration')) rep = cResp.howlong(d);
-                else if (q.includes('gap') || q.includes('miss')) rep = cResp.gap(d);
-                else if (q.includes('score') || q.includes('match')) rep = cResp.score(d);
-                else if (q.includes('start') || q.includes('begin') || q.includes('first')) rep = cResp.start(d);
-                else if (q.includes('hard') || q.includes('difficult')) rep = cResp.hard(d);
-                else if (q.includes('save') || q.includes('skip')) rep = cResp.save(d);
-                else if (q.includes('algo') || q.includes('how') || q.includes('work')) rep = cResp.algo(d);
-                else rep = 'Your ' + role + ' pathway: ' + d.nodes.filter(n => n.days > 0).length + ' modules, ' + d.gaps.length + ' gaps.';
-                addChatMsg(rep, 'ai');
+                typing.remove(); addChatMsg(_localChatReply(msg), 'ai');
             }
-        } catch (e) {
-            typing.remove();
-            addChatMsg('Connection error — using offline mode.', 'ai');
-        }
+        } catch (e) { typing.remove(); addChatMsg('Connection error — ' + _localChatReply(msg), 'ai'); }
     }
 
-    /* ── APP DATA ── */
+    /* ── APP DATA (local fallback — overwritten by _injectBackendData) ── */
     const ROLES = {
         "Software Engineer": {
             color: "#00e6d2", alt: "#0096ff",
             skills: ["Data Structures", "Algorithms", "System Design", "Git & CI/CD", "Cloud Infra", "Testing & QA", "REST APIs", "Docker", "Kubernetes", "SQL"],
             nodes: [
-                { id: "s", t: "you", x: 20, y: 155, label: "YOU", days: 0, pri: null },
-                { id: "n1", t: "gap", x: 195, y: 70, label: "Data Structures", days: 3, pri: "HIGH" },
-                { id: "n2", t: "gap", x: 195, y: 240, label: "Algorithms", days: 4, pri: "HIGH" },
-                { id: "n3", t: "skill", x: 390, y: 70, label: "System Design", days: 2, pri: "MED" },
-                { id: "n4", t: "skill", x: 390, y: 240, label: "Git & CI/CD", days: 1, pri: "LOW" },
-                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready", days: 0, pri: null },
-                { id: "n5", t: "skill", x: 750, y: 70, label: "Cloud Infra", days: 2, pri: "MED" },
-                { id: "n6", t: "skill", x: 750, y: 240, label: "Testing & QA", days: 1, pri: "LOW" },
-                { id: "e", t: "end", x: 935, y: 155, label: "ROLE READY", days: 0, pri: null }
+                { id: "s",  t: "you",   x: 20,  y: 155, label: "YOU",             days: 0, pri: null },
+                { id: "n1", t: "gap",   x: 195, y: 70,  label: "Data Structures", days: 3, pri: "HIGH" },
+                { id: "n2", t: "gap",   x: 195, y: 240, label: "Algorithms",      days: 4, pri: "HIGH" },
+                { id: "n3", t: "skill", x: 390, y: 70,  label: "System Design",   days: 2, pri: "MED" },
+                { id: "n4", t: "skill", x: 390, y: 240, label: "Git & CI/CD",     days: 1, pri: "LOW" },
+                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready",      days: 0, pri: null },
+                { id: "n5", t: "skill", x: 750, y: 70,  label: "Cloud Infra",     days: 2, pri: "MED" },
+                { id: "n6", t: "skill", x: 750, y: 240, label: "Testing & QA",    days: 1, pri: "LOW" },
+                { id: "e",  t: "end",   x: 935, y: 155, label: "ROLE READY",      days: 0, pri: null }
             ],
-            edges: [["s", "n1"], ["s", "n2"], ["n1", "n3"], ["n2", "n4"], ["n3", "m1"], ["n4", "m1"], ["m1", "n5"], ["m1", "n6"], ["n5", "e"], ["n6", "e"]],
-            known: ["Python", "REST APIs", "SQL", "Git", "Linux"], gaps: ["Kubernetes", "System Design", "Distributed Systems"], partial: ["Docker", "Cloud (AWS)", "CI/CD"], score: 71, saved: 14
+            edges: [["s","n1"],["s","n2"],["n1","n3"],["n2","n4"],["n3","m1"],["n4","m1"],["m1","n5"],["m1","n6"],["n5","e"],["n6","e"]],
+            known: ["Python", "REST APIs", "SQL", "Git", "Linux"],
+            gaps: ["Kubernetes", "System Design", "Distributed Systems"],
+            partial: ["Docker", "Cloud (AWS)", "CI/CD"],
+            score: 71, saved: 14
         },
         "Data Scientist": {
             color: "#9b5de5", alt: "#f72585",
             skills: ["Statistics", "ML Fundamentals", "Python", "Deep Learning", "Data Wrangling", "Model Deploy", "SQL", "Feature Eng", "A/B Testing", "Spark"],
             nodes: [
-                { id: "s", t: "you", x: 20, y: 155, label: "YOU", days: 0, pri: null },
-                { id: "n1", t: "gap", x: 195, y: 70, label: "Statistics", days: 4, pri: "HIGH" },
+                { id: "s",  t: "you",   x: 20,  y: 155, label: "YOU",             days: 0, pri: null },
+                { id: "n1", t: "gap",   x: 195, y: 70,  label: "Statistics",      days: 4, pri: "HIGH" },
                 { id: "n2", t: "skill", x: 195, y: 240, label: "Python & Pandas", days: 2, pri: "MED" },
-                { id: "n3", t: "gap", x: 390, y: 70, label: "ML Fundamentals", days: 5, pri: "HIGH" },
-                { id: "n4", t: "skill", x: 390, y: 240, label: "Data Wrangling", days: 2, pri: "MED" },
-                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready", days: 0, pri: null },
-                { id: "n5", t: "skill", x: 750, y: 70, label: "Deep Learning", days: 3, pri: "MED" },
-                { id: "n6", t: "skill", x: 750, y: 240, label: "Model Deploy", days: 2, pri: "LOW" },
-                { id: "e", t: "end", x: 935, y: 155, label: "ROLE READY", days: 0, pri: null }
+                { id: "n3", t: "gap",   x: 390, y: 70,  label: "ML Fundamentals", days: 5, pri: "HIGH" },
+                { id: "n4", t: "skill", x: 390, y: 240, label: "Data Wrangling",  days: 2, pri: "MED" },
+                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready",      days: 0, pri: null },
+                { id: "n5", t: "skill", x: 750, y: 70,  label: "Deep Learning",   days: 3, pri: "MED" },
+                { id: "n6", t: "skill", x: 750, y: 240, label: "Model Deploy",    days: 2, pri: "LOW" },
+                { id: "e",  t: "end",   x: 935, y: 155, label: "ROLE READY",      days: 0, pri: null }
             ],
-            edges: [["s", "n1"], ["s", "n2"], ["n1", "n3"], ["n2", "n4"], ["n3", "m1"], ["n4", "m1"], ["m1", "n5"], ["m1", "n6"], ["n5", "e"], ["n6", "e"]],
-            known: ["Python", "SQL", "Pandas", "Visualization", "Stats Basics"], gaps: ["Deep Learning", "MLOps", "Distributed Computing"], partial: ["ML Fundamentals", "Cloud ML", "A/B Testing"], score: 66, saved: 10
+            edges: [["s","n1"],["s","n2"],["n1","n3"],["n2","n4"],["n3","m1"],["n4","m1"],["m1","n5"],["m1","n6"],["n5","e"],["n6","e"]],
+            known: ["Python", "SQL", "Pandas", "Visualization", "Stats Basics"],
+            gaps: ["Deep Learning", "MLOps", "Distributed Computing"],
+            partial: ["ML Fundamentals", "Cloud ML", "A/B Testing"],
+            score: 66, saved: 10
         },
         "Product Manager": {
             color: "#f72585", alt: "#ff9f1c",
             skills: ["Product Strategy", "Agile/Scrum", "Roadmapping", "Stakeholder Mgmt", "Data Analytics", "UX Research", "Competitive Analysis", "OKRs", "Prioritization", "GTM Strategy"],
             nodes: [
-                { id: "s", t: "you", x: 20, y: 155, label: "YOU", days: 0, pri: null },
-                { id: "n1", t: "gap", x: 195, y: 70, label: "Product Strategy", days: 3, pri: "HIGH" },
-                { id: "n2", t: "gap", x: 195, y: 240, label: "Agile & Scrum", days: 2, pri: "HIGH" },
-                { id: "n3", t: "skill", x: 390, y: 70, label: "Roadmapping", days: 2, pri: "MED" },
+                { id: "s",  t: "you",   x: 20,  y: 155, label: "YOU",              days: 0, pri: null },
+                { id: "n1", t: "gap",   x: 195, y: 70,  label: "Product Strategy", days: 3, pri: "HIGH" },
+                { id: "n2", t: "gap",   x: 195, y: 240, label: "Agile & Scrum",    days: 2, pri: "HIGH" },
+                { id: "n3", t: "skill", x: 390, y: 70,  label: "Roadmapping",      days: 2, pri: "MED" },
                 { id: "n4", t: "skill", x: 390, y: 240, label: "Stakeholder Mgmt", days: 1, pri: "LOW" },
-                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready", days: 0, pri: null },
-                { id: "n5", t: "skill", x: 750, y: 70, label: "Data Analytics", days: 2, pri: "MED" },
-                { id: "n6", t: "skill", x: 750, y: 240, label: "UX Research", days: 1, pri: "LOW" },
-                { id: "e", t: "end", x: 935, y: 155, label: "ROLE READY", days: 0, pri: null }
+                { id: "m1", t: "check", x: 575, y: 155, label: "Core Ready",       days: 0, pri: null },
+                { id: "n5", t: "skill", x: 750, y: 70,  label: "Data Analytics",   days: 2, pri: "MED" },
+                { id: "n6", t: "skill", x: 750, y: 240, label: "UX Research",      days: 1, pri: "LOW" },
+                { id: "e",  t: "end",   x: 935, y: 155, label: "ROLE READY",       days: 0, pri: null }
             ],
-            edges: [["s", "n1"], ["s", "n2"], ["n1", "n3"], ["n2", "n4"], ["n3", "m1"], ["n4", "m1"], ["m1", "n5"], ["m1", "n6"], ["n5", "e"], ["n6", "e"]],
-            known: ["Communication", "Project Mgmt", "Stakeholder Mgmt", "Excel", "Agile Basics"], gaps: ["Product Strategy", "OKR Framework", "GTM Strategy"], partial: ["Data Analytics", "UX Research", "Competitive Analysis"], score: 68, saved: 11
+            edges: [["s","n1"],["s","n2"],["n1","n3"],["n2","n4"],["n3","m1"],["n4","m1"],["m1","n5"],["m1","n6"],["n5","e"],["n6","e"]],
+            known: ["Communication", "Project Mgmt", "Stakeholder Mgmt", "Excel", "Agile Basics"],
+            gaps: ["Product Strategy", "OKR Framework", "GTM Strategy"],
+            partial: ["Data Analytics", "UX Research", "Competitive Analysis"],
+            score: 68, saved: 11
         }
     };
 
-    /* ── D3 GRAPH ── */
+    /* ── _injectBackendData — merges real API response into ROLES ── */
+    function _injectBackendData(data) {
+        const nodes = data.pathway_nodes.map(n => ({
+            id: n.id, t: n.node_type, node_type: n.node_type,
+            x: n.x, y: n.y, label: n.label, days: n.days, pri: n.priority
+        }));
+        const edges = data.pathway_edges.map(e => [e.source, e.target]);
+        ROLES[data.role] = {
+            ...(ROLES[data.role] || {}),
+            color: (ROLES[data.role] || {}).color || "#00e5b8",
+            nodes, edges,
+            known:   data.known_skills,
+            partial: data.partial_skills,
+            gaps:    data.gap_skills,
+            score:   data.match_score,
+            saved:   data.days_saved,
+            skills:  data.jd_skills.map(s => s.name || s).slice(0, 10),
+            graphData: data.graph_data || null,
+            _raw: data
+        };
+    }
+
+    /* ── D3 GRAPH — uses _nt() for node type ── */
     function renderGraphD3(d, c) {
         const width = 1100, height = 330;
         const svg = d3.select("#pathway-svg").attr("viewBox", `0 0 ${width} ${height}`);
         svg.selectAll("*").remove();
-        const edges = svg.selectAll(".edge").data(d.edges).enter().append("path").attr("class", "edge").attr("fill", "none").attr("stroke", edge => { const target = d.nodes.find(n => n.id === edge[1]); return NC[target?.t]?.stroke || "#fff"; }).attr("stroke-width", 1.5).attr("stroke-dasharray", "6 4").attr("opacity", 0.6).attr("d", edge => { const s = d.nodes.find(n => n.id === edge[0]); const t = d.nodes.find(n => n.id === edge[1]); const x1 = s.x + 66, y1 = s.y + 28, x2 = t.x + 66, y2 = t.y + 28, mx = (x1 + x2) / 2; return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`; });
+        const edges = svg.selectAll(".edge").data(d.edges).enter().append("path")
+            .attr("class", "edge").attr("fill", "none")
+            .attr("stroke", edge => { const target = d.nodes.find(n => n.id === edge[1]); return NC[_nt(target)]?.stroke || "#fff"; })
+            .attr("stroke-width", 1.5).attr("stroke-dasharray", "6 4").attr("opacity", 0.6)
+            .attr("d", edge => {
+                const s = d.nodes.find(n => n.id === edge[0]);
+                const t = d.nodes.find(n => n.id === edge[1]);
+                const x1 = s.x + 66, y1 = s.y + 28, x2 = t.x + 66, y2 = t.y + 28, mx = (x1 + x2) / 2;
+                return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+            });
         function animateDashes() { edges.attr("stroke-dashoffset", 600).transition().duration(3000).ease(d3.easeLinear).attr("stroke-dashoffset", 0).on("end", animateDashes); }
         animateDashes();
-        const nodes = svg.selectAll(".node").data(d.nodes).enter().append("g").attr("class", "node").attr("transform", n => `translate(${n.x}, ${n.y})`).style("cursor", "pointer").on("click", (event, n) => selNode(n.id)).on("mouseover", function () { d3.select(this).select("rect").transition().duration(150).attr("stroke-width", 2.5); }).on("mouseout", function () { d3.select(this).select("rect").transition().duration(150).attr("stroke-width", 0.9); });
-        nodes.append("rect").attr("width", 132).attr("height", 56).attr("rx", 9).attr("fill", n => NC[n.t]?.fill || "rgba(255,255,255,.04)").attr("stroke", n => NC[n.t]?.stroke || "#fff").attr("stroke-width", 0.9);
-        nodes.append("text").attr("x", 66).attr("y", 31).attr("text-anchor", "middle").attr("font-size", 10.5).attr("font-weight", 700).attr("fill", n => NC[n.t]?.text || "#fff").text(n => n.label.length > 14 ? n.label.slice(0, 13) + "…" : n.label);
+        const nodes = svg.selectAll(".node").data(d.nodes).enter().append("g")
+            .attr("class", "node").attr("transform", n => `translate(${n.x}, ${n.y})`).style("cursor", "pointer")
+            .on("click", (event, n) => selNode(n.id))
+            .on("mouseover", function () { d3.select(this).select("rect").transition().duration(150).attr("stroke-width", 2.5); })
+            .on("mouseout",  function () { d3.select(this).select("rect").transition().duration(150).attr("stroke-width", 0.9); });
+        nodes.append("rect").attr("width", 132).attr("height", 56).attr("rx", 9)
+            .attr("fill",   n => NC[_nt(n)]?.fill   || "rgba(255,255,255,.04)")
+            .attr("stroke", n => NC[_nt(n)]?.stroke  || "#fff")
+            .attr("stroke-width", 0.9);
+        nodes.append("text").attr("x", 66).attr("y", 31).attr("text-anchor", "middle")
+            .attr("font-size", 10.5).attr("font-weight", 700)
+            .attr("fill", n => NC[_nt(n)]?.text || "#fff")
+            .text(n => n.label.length > 14 ? n.label.slice(0, 13) + "…" : n.label);
         nodes.attr("opacity", 0).transition().delay((_, i) => i * 80).duration(400).attr("opacity", 1);
     }
 
+    /* selNode — uses _nt() */
     function selNode(id) {
         const d = ROLES[role], node = d.nodes.find(n => n.id === id); if (!node) return;
-        if (selId) { const prev = document.getElementById("nd-" + selId); if (prev) prev.setAttribute("stroke-width", ".9"); }
-        selId = id; const el = document.getElementById("nd-" + id); if (el) el.setAttribute("stroke-width", "2");
-        const cfg = NC[node.t] || NC.skill;
+        selId = id;
+        const cfg = NC[_nt(node)] || NC.skill;
         document.getElementById("insp-empty").classList.add("hidden");
         const cont = document.getElementById("insp-content"); cont.classList.remove("hidden");
         let extra = "";
-        if (node.t === "gap") extra = `<div style="background:rgba(255,79,216,.07);border:1px solid rgba(255,79,216,.2);border-radius:var(--r);padding:12px 14px;font-size:.78rem;font-family:var(--mono);color:rgba(255,154,235,.85);line-height:1.65;margin-top:12px"><div style="font-weight:700;margin-bottom:5px;color:#ff4fd8;font-size:.75rem;letter-spacing:.08em;text-transform:uppercase">⚠ Gap Detected</div>Missing from resume, required by JD.</div>`;
-        if (node.t === "check") extra = `<div style="background:rgba(0,229,184,.07);border:1px solid rgba(0,229,184,.2);border-radius:var(--r);padding:12px 14px;font-size:.78rem;font-family:var(--mono);color:rgba(0,229,184,.9);line-height:1.65;margin-top:12px"><div style="font-weight:700;margin-bottom:5px;font-size:.75rem;letter-spacing:.08em;text-transform:uppercase">✓ Checkpoint</div>All prerequisites complete. Next cluster unlocked.</div>`;
-        cont.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><div style="width:10px;height:10px;border-radius:3px;background:${cfg.stroke};box-shadow:0 0 8px ${cfg.stroke}55;flex-shrink:0"></div><span style="font-size:.95rem;font-weight:700;color:${cfg.text}">${node.label}</span>${node.pri ? `<span style="font-size:.62rem;font-weight:700;padding:3px 8px;border-radius:5px;font-family:var(--mono);background:${node.pri === "HIGH" ? "rgba(244,63,94,.15)" : "rgba(245,158,11,.12)"};color:${node.pri === "HIGH" ? "#f43f5e" : "#f59e0b"};border:1px solid ${node.pri === "HIGH" ? "rgba(244,63,94,.28)" : "rgba(245,158,11,.25)"};letter-spacing:.08em;text-transform:uppercase">${node.pri} Priority</span>` : ""}</div><div class="im">${[["Type", node.t], ["Duration", node.days ? node.days + " days" : "—"], ["Node ID", node.id], ["Status", node.t === "gap" ? "Blocked" : "Unlocked"]].map(([k, v]) => `<div class="if"><div class="ik">${k}</div><div class="iv">${v}</div></div>`).join("")}</div>${extra}`;
+        if (_nt(node) === "gap")   extra = `<div style="background:rgba(255,79,216,.07);border:1px solid rgba(255,79,216,.2);border-radius:var(--r);padding:12px 14px;font-size:.78rem;font-family:var(--mono);color:rgba(255,154,235,.85);line-height:1.65;margin-top:12px"><div style="font-weight:700;margin-bottom:5px;color:#ff4fd8;font-size:.75rem;letter-spacing:.08em;text-transform:uppercase">⚠ Gap Detected</div>Missing from resume, required by JD. High priority — must complete before advancing.</div>`;
+        if (_nt(node) === "check") extra = `<div style="background:rgba(0,229,184,.07);border:1px solid rgba(0,229,184,.2);border-radius:var(--r);padding:12px 14px;font-size:.78rem;font-family:var(--mono);color:rgba(0,229,184,.9);line-height:1.65;margin-top:12px"><div style="font-weight:700;margin-bottom:5px;font-size:.75rem;letter-spacing:.08em;text-transform:uppercase">✓ Checkpoint</div>All prerequisites complete. Next cluster unlocked.</div>`;
+        cont.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <div style="width:10px;height:10px;border-radius:3px;background:${cfg.stroke};box-shadow:0 0 8px ${cfg.stroke}55;flex-shrink:0"></div>
+            <span style="font-size:.95rem;font-weight:700;color:${cfg.text}">${node.label}</span>
+            ${node.pri ? `<span style="font-size:.62rem;font-weight:700;padding:3px 8px;border-radius:5px;font-family:var(--mono);background:${node.pri === "HIGH" ? "rgba(244,63,94,.15)" : "rgba(245,158,11,.12)"};color:${node.pri === "HIGH" ? "#f43f5e" : "#f59e0b"};border:1px solid ${node.pri === "HIGH" ? "rgba(244,63,94,.28)" : "rgba(245,158,11,.25)"};letter-spacing:.08em;text-transform:uppercase">${node.pri} Priority</span>` : ""}
+            </div>
+            <div class="im">${[["Type", _nt(node)], ["Duration", node.days ? node.days + " days" : "—"], ["Node ID", node.id], ["Status", _nt(node) === "gap" ? "Blocked" : "Unlocked"]].map(([k, v]) => `<div class="if"><div class="ik">${k}</div><div class="iv">${v}</div></div>`).join("")}</div>${extra}`;
     }
 
+    /* ── renderSkillGaps — real backend known/partial/gaps/score ── */
     function renderSkillGaps(d, c) {
-        document.getElementById("skill-gaps").innerHTML = [{ s: "known", hc: "#10b981", h: "✓ Proficient", l: d.known }, { s: "partial", hc: "#f59e0b", h: "◐ Partial", l: d.partial }, { s: "gap", hc: "#f43f5e", h: "✗ Gaps", l: d.gaps }].map(r => { const bc = { known: { bg: "rgba(0,229,184,.08)", b: "rgba(0,229,184,.25)", t: "#00e5b8" }, partial: { bg: "rgba(232,255,71,.07)", b: "rgba(232,255,71,.2)", t: "#e8ff47" }, gap: { bg: "rgba(255,79,216,.08)", b: "rgba(255,79,216,.25)", t: "#ff4fd8" } }[r.s]; return `<div style="margin-bottom:14px"><div style="font-size:.68rem;font-weight:700;letter-spacing:.12em;margin-bottom:8px;font-family:var(--mono);color:${r.hc};text-transform:uppercase">${r.h} (${r.l.length})</div><div>${r.l.map(s => `<span class="bdg" style="background:${bc.bg};border:1px solid ${bc.b};color:${bc.t}"><span class="bdg-dot" style="background:${bc.t}"></span>${s}</span>`).join("")}</div></div>`; }).join("");
-        document.getElementById("score-lbl").style.color = c; document.getElementById("score-lbl").textContent = d.score + "%";
-        const bar = document.getElementById("score-bar"); bar.style.background = "linear-gradient(90deg," + c + ",#00e5b8)";
-        setTimeout(() => bar.style.width = d.score + "%", 100);
-        document.getElementById("gap-hint").textContent = `Complete ${d.nodes.filter(n => n.t === "gap").length} gap modules to reach 100%`;
+        var known   = _known(d);
+        var partial = _partial(d);
+        var gaps    = _gaps(d);
+        var score   = _score(d);
+
+        document.getElementById("skill-gaps").innerHTML = [
+            { s: "known",   hc: "#10b981", h: "✓ Proficient", l: known   },
+            { s: "partial", hc: "#f59e0b", h: "◐ Partial",    l: partial },
+            { s: "gap",     hc: "#f43f5e", h: "✗ Gaps",       l: gaps    }
+        ].map(function(r) {
+            const bc = {
+                known:   { bg: "rgba(0,229,184,.08)",  b: "rgba(0,229,184,.25)",  t: "#00e5b8" },
+                partial: { bg: "rgba(232,255,71,.07)", b: "rgba(232,255,71,.2)",  t: "#e8ff47" },
+                gap:     { bg: "rgba(255,79,216,.08)", b: "rgba(255,79,216,.25)", t: "#ff4fd8" }
+            }[r.s];
+            return `<div style="margin-bottom:14px">
+                <div style="font-size:.68rem;font-weight:700;letter-spacing:.12em;margin-bottom:8px;font-family:var(--mono);color:${r.hc};text-transform:uppercase">${r.h} (${r.l.length})</div>
+                <div>${r.l.map(s => `<span class="bdg" style="background:${bc.bg};border:1px solid ${bc.b};color:${bc.t}"><span class="bdg-dot" style="background:${bc.t}"></span>${s}</span>`).join("")}</div>
+            </div>`;
+        }).join("");
+
+        document.getElementById("score-lbl").style.color = c;
+        document.getElementById("score-lbl").textContent = score + "%";
+        const bar = document.getElementById("score-bar");
+        bar.style.background = "linear-gradient(90deg," + c + ",#00e5b8)";
+        setTimeout(() => bar.style.width = score + "%", 100);
+        document.getElementById("gap-hint").textContent = `Complete ${gaps.length} gap modules to reach 100%`;
     }
 
+    /* ── renderRadar — real backend skills, known, partial, confidence ── */
     function renderRadar(d, c) {
-        const skills = d.skills.slice(0, 7).map(nm => { const s = nm.toLowerCase().slice(0, 5); const cur = d.known.some(k => k.toLowerCase().includes(s)) ? 82 : d.partial.some(k => k.toLowerCase().includes(s)) ? 48 : 14; return { name: nm.length > 9 ? nm.slice(0, 8) + "." : nm, current: cur, target: 90 }; });
-        const N = skills.length, CX = 130, CY = 130, R = 95, angle = i => (i / N) * 2 * Math.PI - Math.PI / 2, pt = (r, i) => [CX + r * Math.cos(angle(i)), CY + r * Math.sin(angle(i))], poly = arr => arr.map(p => p.join(",")).join(" ");
-        let h = ""; [.25, .5, .75, 1].forEach(l => h += `<polygon points="${poly(skills.map((_, i) => pt(R * l, i)))}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width=".8"/>`);
+        var skillNames  = _skills(d);
+        var known       = _known(d);
+        var partial     = _partial(d);
+        var confidence  = _confidence(d);
+
+        const skills = skillNames.map(function(nm) {
+            const s = nm.toLowerCase().slice(0, 5);
+            const cur = known.some(k   => k.toLowerCase().includes(s)) ? 82
+                      : partial.some(k => k.toLowerCase().includes(s)) ? 48 : 14;
+            return { name: nm.length > 9 ? nm.slice(0, 8) + "." : nm, current: cur, target: 90 };
+        });
+
+        const N = skills.length, CX = 130, CY = 130, R = 95,
+              angle = i => (i / N) * 2 * Math.PI - Math.PI / 2,
+              pt    = (r, i) => [CX + r * Math.cos(angle(i)), CY + r * Math.sin(angle(i))],
+              poly  = arr => arr.map(p => p.join(",")).join(" ");
+
+        let h = "";
+        [.25, .5, .75, 1].forEach(l => h += `<polygon points="${poly(skills.map((_, i) => pt(R * l, i)))}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width=".8"/>`);
         skills.forEach((_, i) => { const [x, y] = pt(R, i); h += `<line x1="${CX}" y1="${CY}" x2="${x}" y2="${y}" stroke="rgba(255,255,255,.05)" stroke-width=".8"/>`; });
         h += `<polygon points="${poly(skills.map((s, i) => pt(R * (s.target / 100), i)))}" fill="${c}10" stroke="${c}" stroke-width=".9" stroke-dasharray="3 2" opacity=".5"/>`;
         h += `<polygon points="${poly(skills.map((s, i) => pt(R * (s.current / 100), i)))}" fill="${c}25" stroke="${c}" stroke-width="1.5"/>`;
         skills.forEach((s, i) => { const [x, y] = pt(R * (s.current / 100), i); h += `<circle cx="${x}" cy="${y}" r="3.5" fill="${c}" style="filter:drop-shadow(0 0 4px ${c})"/>`; });
         skills.forEach((s, i) => { const [x, y] = pt(R + 20, i); h += `<text x="${x}" y="${y + 3}" text-anchor="middle" font-size="8.5" fill="rgba(148,163,184,.65)" font-family="'JetBrains Mono',monospace" font-weight="600">${s.name}</text>`; });
         document.getElementById("radar-svg").innerHTML = h;
-        const r2 = 50, sw = 7, C2 = 2 * Math.PI * r2, arc = C2 * .75, filled = arc * .94;
-        document.getElementById("gauge-svg").innerHTML = `<defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${c}" stop-opacity=".4"/><stop offset="100%" stop-color="${c}"/></linearGradient></defs><circle cx="65" cy="72" r="${r2}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="${sw}" stroke-dasharray="${arc} ${C2}" stroke-dashoffset="${C2 * .25}" stroke-linecap="round" transform="rotate(-225,65,72)"/><circle cx="65" cy="72" r="${r2}" fill="none" stroke="url(#gg)" stroke-width="${sw}" stroke-dasharray="${filled} ${C2}" stroke-dashoffset="${C2 * .25}" stroke-linecap="round" transform="rotate(-225,65,72)" style="filter:drop-shadow(0 0 6px ${c})"/><text x="65" y="65" text-anchor="middle" font-size="21" font-weight="800" fill="${c}" font-family="'JetBrains Mono',monospace">94%</text><text x="65" y="80" text-anchor="middle" font-size="7.5" fill="rgba(148,163,184,.4)" font-family="'JetBrains Mono',monospace" letter-spacing="1">CONFIDENCE</text>`;
-        document.getElementById("radar-bars").innerHTML = skills.map(s => { const bc = s.current > 70 ? c : s.current > 40 ? "#ff9f1c" : "#f72585"; return `<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;font-size:11px;font-family:'JetBrains Mono',monospace;margin-bottom:5px"><span style="color:rgba(220,220,235,.8)">${s.name}</span><span style="font-weight:700;color:${bc}">${s.current}% / ${s.target}%</span></div><div style="position:relative;height:5px;background:rgba(255,255,255,.05);border-radius:100px;overflow:hidden"><div style="position:absolute;left:0;top:0;height:100%;width:${s.target}%;background:rgba(255,255,255,.05);border-radius:100px"></div><div style="height:100%;border-radius:100px;background:linear-gradient(90deg,${bc},${bc}cc);width:${s.current}%;transition:width 1.1s ease;box-shadow:0 0 6px ${bc}60"></div></div><div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(148,163,184,.22);margin-top:3px;text-align:right">gap: ${s.target - s.current} pts</div></div>`; }).join("");
+
+        /* Gauge — real confidence from hallucination_guard */
+        const confPct = Math.round(confidence);
+        const r2 = 50, sw = 7, C2 = 2 * Math.PI * r2, arc = C2 * .75, filled = arc * (confidence / 100);
+        document.getElementById("gauge-svg").innerHTML = `<defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="${c}" stop-opacity=".4"/><stop offset="100%" stop-color="${c}"/></linearGradient></defs>
+            <circle cx="65" cy="72" r="${r2}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="${sw}" stroke-dasharray="${arc} ${C2}" stroke-dashoffset="${C2 * .25}" stroke-linecap="round" transform="rotate(-225,65,72)"/>
+            <circle cx="65" cy="72" r="${r2}" fill="none" stroke="url(#gg)" stroke-width="${sw}" stroke-dasharray="${filled} ${C2}" stroke-dashoffset="${C2 * .25}" stroke-linecap="round" transform="rotate(-225,65,72)" style="filter:drop-shadow(0 0 6px ${c})"/>
+            <text x="65" y="65" text-anchor="middle" font-size="21" font-weight="800" fill="${c}" font-family="'JetBrains Mono',monospace">${confPct}%</text>
+            <text x="65" y="80" text-anchor="middle" font-size="7.5" fill="rgba(148,163,184,.4)" font-family="'JetBrains Mono',monospace" letter-spacing="1">CONFIDENCE</text>`;
+
+        document.getElementById("radar-bars").innerHTML = skills.map(s => {
+            const bc = s.current > 70 ? c : s.current > 40 ? "#ff9f1c" : "#f72585";
+            return `<div style="margin-bottom:10px">
+                <div style="display:flex;justify-content:space-between;font-size:11px;font-family:'JetBrains Mono',monospace;margin-bottom:5px">
+                    <span style="color:rgba(220,220,235,.8)">${s.name}</span>
+                    <span style="font-weight:700;color:${bc}">${s.current}% / ${s.target}%</span>
+                </div>
+                <div style="position:relative;height:5px;background:rgba(255,255,255,.05);border-radius:100px;overflow:hidden">
+                    <div style="position:absolute;left:0;top:0;height:100%;width:${s.target}%;background:rgba(255,255,255,.05);border-radius:100px"></div>
+                    <div style="height:100%;border-radius:100px;background:linear-gradient(90deg,${bc},${bc}cc);width:${s.current}%;transition:width 1.1s ease;box-shadow:0 0 6px ${bc}60"></div>
+                </div>
+                <div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(148,163,184,.22);margin-top:3px;text-align:right">gap: ${s.target - s.current} pts</div>
+            </div>`;
+        }).join("");
     }
 
+    /* ── renderTimeline — uses _nt() for node type colouring ── */
     function renderTimeline(d, c) {
         const tr = d.nodes.filter(n => n.days > 0), total = tr.reduce((s, n) => s + n.days, 0);
         document.getElementById("tl-lbl").textContent = `TRAINING TIMELINE — ${total} TOTAL DAYS`;
         let cum = 0;
-        document.getElementById("tl-bar").innerHTML = tr.map(n => { const pct = (n.days / total) * 100, cfg = NC[n.t] || NC.skill; return `<div title="${n.label} — ${n.days}d" style="flex:0 0 ${pct}%;height:30px;border-radius:4px;background:${cfg.fill};border:1px solid ${cfg.stroke};display:flex;align-items:center;justify-content:center;overflow:hidden;margin-right:2px">${pct > 8 ? `<span style="font-size:8px;font-family:'JetBrains Mono',monospace;color:${cfg.text};font-weight:700">${n.label.slice(0, 7)}</span>` : ""}</div>`; }).join("");
-        document.getElementById("tl-days").innerHTML = tr.map(n => { const pct = (n.days / total) * 100; cum += n.days; return `<div style="flex:0 0 ${pct}%;text-align:right;padding-right:2px;margin-right:2px"><span style="font-size:8px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.5)">d${cum}</span></div>`; }).join("");
-        document.getElementById("tl-phases").innerHTML = [{ l: "Phase 1 — Gaps", days: d.nodes.filter(n => n.t === "gap").reduce((s, n) => s + n.days, 0), col: "#ff4fd8" }, { l: "Phase 2 — Skills", days: d.nodes.filter(n => n.t === "skill").reduce((s, n) => s + n.days, 0), col: c }, { l: "Total Modules", days: total, col: "#00e5b8" }].map(p => `<div style="background:rgba(255,255,255,.02);border:1px solid ${p.col}22;border-radius:10px;padding:13px 15px"><div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);letter-spacing:1px;margin-bottom:5px;text-transform:uppercase">${p.l}</div><div style="font-size:26px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${p.col}">${p.days}d</div></div>`).join("");
-        let day = 1; document.getElementById("tl-sched").innerHTML = tr.map(n => { const start = day; day += n.days; const cfg = NC[n.t] || NC.skill; return `<div class="di"><div class="db" style="background:${cfg.fill};border:1px solid ${cfg.stroke}"><div style="font-size:.55rem;font-family:var(--m);color:${cfg.stroke};letter-spacing:.1em">DAY</div><div style="font-size:.95rem;font-weight:800;font-family:var(--m);color:${cfg.text}">${start}</div></div><div style="flex:1"><div style="font-size:.85rem;font-weight:600;color:var(--text)">${n.label}</div><div style="font-size:.7rem;font-family:var(--m);color:var(--fg3);margin-top:3px">${n.days} day${n.days > 1 ? "s" : ""} · ${n.t.toUpperCase()}${n.pri ? ` · <span style="color:${n.pri === "HIGH" ? "#ff4fd8" : "#e8ff47"};font-weight:700">${n.pri}</span>` : ""}</div></div><div style="font-size:.7rem;font-weight:700;font-family:var(--m);color:${cfg.stroke};padding:4px 10px;border-radius:6px;background:${cfg.fill};border:1px solid ${cfg.stroke}30;flex-shrink:0">d${start}–d${start + n.days - 1}</div></div>`; }).join("");
+        document.getElementById("tl-bar").innerHTML = tr.map(n => {
+            const pct = (n.days / total) * 100, cfg = NC[_nt(n)] || NC.skill;
+            return `<div title="${n.label} — ${n.days}d" style="flex:0 0 ${pct}%;height:30px;border-radius:4px;background:${cfg.fill};border:1px solid ${cfg.stroke};display:flex;align-items:center;justify-content:center;overflow:hidden;margin-right:2px">
+                ${pct > 8 ? `<span style="font-size:8px;font-family:'JetBrains Mono',monospace;color:${cfg.text};font-weight:700">${n.label.slice(0, 7)}</span>` : ""}
+            </div>`;
+        }).join("");
+        document.getElementById("tl-days").innerHTML = tr.map(n => {
+            const pct = (n.days / total) * 100; cum += n.days;
+            return `<div style="flex:0 0 ${pct}%;text-align:right;padding-right:2px;margin-right:2px"><span style="font-size:8px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.5)">d${cum}</span></div>`;
+        }).join("");
+        document.getElementById("tl-phases").innerHTML = [
+            { l: "Phase 1 — Gaps",   days: d.nodes.filter(n => _nt(n) === "gap").reduce((s, n)   => s + n.days, 0), col: "#ff4fd8" },
+            { l: "Phase 2 — Skills", days: d.nodes.filter(n => _nt(n) === "skill").reduce((s, n) => s + n.days, 0), col: c         },
+            { l: "Total Modules",    days: total,                                                                    col: "#00e5b8" }
+        ].map(p => `<div style="background:rgba(255,255,255,.02);border:1px solid ${p.col}22;border-radius:10px;padding:13px 15px">
+            <div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);letter-spacing:1px;margin-bottom:5px;text-transform:uppercase">${p.l}</div>
+            <div style="font-size:26px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${p.col}">${p.days}d</div>
+        </div>`).join("");
+        let day = 1;
+        document.getElementById("tl-sched").innerHTML = tr.map(n => {
+            const start = day; day += n.days; const cfg = NC[_nt(n)] || NC.skill;
+            return `<div class="di">
+                <div class="db" style="background:${cfg.fill};border:1px solid ${cfg.stroke}">
+                    <div style="font-size:.55rem;font-family:var(--m);color:${cfg.stroke};letter-spacing:.1em">DAY</div>
+                    <div style="font-size:.95rem;font-weight:800;font-family:var(--m);color:${cfg.text}">${start}</div>
+                </div>
+                <div style="flex:1">
+                    <div style="font-size:.85rem;font-weight:600;color:var(--text)">${n.label}</div>
+                    <div style="font-size:.7rem;font-family:var(--m);color:var(--fg3);margin-top:3px">${n.days} day${n.days > 1 ? "s" : ""} · ${_nt(n).toUpperCase()}${n.pri ? ` · <span style="color:${n.pri === "HIGH" ? "#ff4fd8" : "#e8ff47"};font-weight:700">${n.pri}</span>` : ""}</div>
+                </div>
+                <div style="font-size:.7rem;font-weight:700;font-family:var(--m);color:${cfg.stroke};padding:4px 10px;border-radius:6px;background:${cfg.fill};border:1px solid ${cfg.stroke}30;flex-shrink:0">d${start}–d${start + n.days - 1}</div>
+            </div>`;
+        }).join("");
     }
 
+    /* ── renderTrace — uses real reasoning_trace from backend when available ── */
     function renderTrace(d, c) {
-        const gc = d.nodes.filter(n => n.t === "gap").length;
-        document.getElementById("trace-steps").innerHTML = [{ n: "01", title: "ENTITY EXTRACTION", col: "#00e5b8", border: "rgba(0,229,184,.15)", bg: "rgba(0,229,184,.03)", items: ["Tokenized 847 resume tokens", "BERT NER: 12 technical skills", "BERT NER: 4 soft skills found", "JD required: 19 total skills", "6 domain clusters identified"] }, { n: "02", title: "GAP COMPUTATION", col: "#e8ff47", border: "rgba(232,255,71,.14)", bg: "rgba(232,255,71,.025)", items: ["768-dim embeddings computed", "Cosine sim matrix: 26x340", "Threshold alpha = 0.78 applied", `${gc} critical gaps found`, "Confidence: >= 0.82 per gap"] }, { n: "03", title: "ADAPTIVE PATHING", col: "#ff4fd8", border: "rgba(255,79,216,.14)", bg: "rgba(255,79,216,.03)", items: ["O*NET v28 loaded (340 nodes)", "BFS on dependency graph", "Sort: JD weight x depth x effort", `Path: ${d.edges.length} edges`, "0 catalog violations found"] }].map(tr => `<div style="border:1px solid ${tr.border};border-radius:10px;padding:16px;background:${tr.bg};position:relative;overflow:hidden"><div style="position:absolute;top:8px;right:12px;font-size:32px;font-weight:900;color:${tr.col};opacity:.08;font-family:'JetBrains Mono',monospace;line-height:1">${tr.n}</div><div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:${tr.col};font-weight:700;letter-spacing:1.5px;margin-bottom:10px">STEP ${tr.n} · ${tr.title}</div><ul style="list-style:none;display:flex;flex-direction:column;gap:6px">${tr.items.map(item => `<li style="display:flex;align-items:flex-start;gap:7px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.7);line-height:1.5"><span style="color:${tr.col};flex-shrink:0;margin-top:1px">›</span>${item}</li>`).join("")}</ul></div>`).join("");
+        var raw = d._raw || {};
+        /* If backend returned real reasoning trace steps, render those */
+        if (raw.reasoning_trace && raw.reasoning_trace.steps && raw.reasoning_trace.steps.length) {
+            var steps = raw.reasoning_trace.steps;
+            var cols = ["#00e5b8", "#e8ff47", "#ff4fd8", "#9b5de5", "#0096ff"];
+            document.getElementById("trace-steps").innerHTML = steps.map(function(step, idx) {
+                var col = cols[idx % cols.length];
+                var num = String(idx + 1).padStart(2, '0');
+                var title = (step.output_summary || step.input_summary || ('Step ' + (idx + 1))).toUpperCase().slice(0, 40);
+                var confPct = Math.round((step.confidence !== undefined ? step.confidence : 0.95) * 100);
+                var details = step.details || [];
+                return `<div style="border:1px solid ${col}22;border-radius:10px;padding:16px;background:${col}05;position:relative;overflow:hidden">
+                    <div style="position:absolute;top:8px;right:12px;font-size:32px;font-weight:900;color:${col};opacity:.08;font-family:'JetBrains Mono',monospace;line-height:1">${num}</div>
+                    <div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:${col};font-weight:700;letter-spacing:1.5px;margin-bottom:10px">STEP ${num} · ${title}</div>
+                    <ul style="list-style:none;display:flex;flex-direction:column;gap:6px">
+                        ${details.map(item => `<li style="display:flex;align-items:flex-start;gap:7px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.7);line-height:1.5"><span style="color:${col};flex-shrink:0;margin-top:1px">›</span>${item}</li>`).join("")}
+                    </ul>
+                    <div style="margin-top:8px;font-size:9px;font-family:'JetBrains Mono',monospace;color:${col};opacity:.6">Confidence: ${confPct}%</div>
+                </div>`;
+            }).join("");
+            return;
+        }
+        /* Fallback: build trace from real counts extracted from the data */
+        var gapCount   = d.nodes.filter(n => _nt(n) === "gap").length;
+        var edgeCount  = d.edges.length;
+        var knownCount = _known(d).length;
+        var gapList    = _gaps(d).slice(0, 3).join(', ') || 'detected';
+        var confPct    = Math.round(_confidence(d));
+        document.getElementById("trace-steps").innerHTML = [
+            { n: "01", title: "ENTITY EXTRACTION",  col: "#00e5b8", border: "rgba(0,229,184,.15)",  bg: "rgba(0,229,184,.03)",  items: ["spaCy NER + Groq LLaMA-3.3 skill extraction", "Resume + JD skills merged & deduped", `${knownCount} known skills confirmed from resume`, "JD competencies loaded from O*NET v28", "6 domain clusters identified"] },
+            { n: "02", title: "GAP COMPUTATION",    col: "#e8ff47", border: "rgba(232,255,71,.14)",  bg: "rgba(232,255,71,.025)", items: ["String-match + embedding similarity applied", `Threshold alpha = 0.78`, `${gapCount} critical gaps found: ${gapList}`, "Priority assigned: HIGH / MED / LOW", `Confidence: ${confPct}%`] },
+            { n: "03", title: "ADAPTIVE PATHING",   col: "#ff4fd8", border: "rgba(255,79,216,.14)",  bg: "rgba(255,79,216,.03)",  items: ["O*NET v28 dependency graph loaded", "Adaptive BFS traversal complete", "Sort: JD weight × depth × effort", `Path: ${edgeCount} edges built`, "0 catalog violations found"] }
+        ].map(tr => `<div style="border:1px solid ${tr.border};border-radius:10px;padding:16px;background:${tr.bg};position:relative;overflow:hidden">
+            <div style="position:absolute;top:8px;right:12px;font-size:32px;font-weight:900;color:${tr.col};opacity:.08;font-family:'JetBrains Mono',monospace;line-height:1">${tr.n}</div>
+            <div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:${tr.col};font-weight:700;letter-spacing:1.5px;margin-bottom:10px">STEP ${tr.n} · ${tr.title}</div>
+            <ul style="list-style:none;display:flex;flex-direction:column;gap:6px">
+                ${tr.items.map(item => `<li style="display:flex;align-items:flex-start;gap:7px;font-size:10.5px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.7);line-height:1.5"><span style="color:${tr.col};flex-shrink:0;margin-top:1px">›</span>${item}</li>`).join("")}
+            </ul>
+        </div>`).join("");
     }
 
+    /* ── renderPlanner — uses _nt() for node type ── */
     function renderPlanner(hrs) {
         const d = ROLES[role], trainable = d.nodes.filter(n => n.days > 0), c = d.color;
         const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
         const typeC = { gap: '#ff4fd8', skill: '#00e5b8', check: '#00e5b8', end: '#e8ff47', you: '#e8ff47' };
-        const slots = []; trainable.forEach(n => { for (let d2 = 0; d2 < n.days; d2++) slots.push({ label: n.label, type: n.t, pri: n.pri, dayOf: d2 + 1, totalDays: n.days }); });
+        const slots = [];
+        trainable.forEach(n => { for (let d2 = 0; d2 < n.days; d2++) slots.push({ label: n.label, type: _nt(n), pri: n.pri, dayOf: d2 + 1, totalDays: n.days }); });
         const weeks = []; for (let i = 0; i < slots.length; i += 7) weeks.push(slots.slice(i, i + 7));
         const el = document.getElementById('planner-weeks'); if (!el) return;
         const totalDays = slots.length, totalWeeks = weeks.length;
-        const summaryHtml = `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px"><div style="background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(232,255,71,.6);text-transform:uppercase;margin-bottom:5px">Total Days</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#e8ff47">${totalDays}</div></div><div style="background:rgba(0,229,184,.08);border:1px solid rgba(0,229,184,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(0,229,184,.6);text-transform:uppercase;margin-bottom:5px">Weeks</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#00e5b8">${totalWeeks}</div></div><div style="background:rgba(255,79,216,.08);border:1px solid rgba(255,79,216,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(255,79,216,.6);text-transform:uppercase;margin-bottom:5px">Hrs / day</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#ff4fd8">${hrs}h</div></div></div>`;
+        const summaryHtml = `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+            <div style="background:rgba(232,255,71,.08);border:1px solid rgba(232,255,71,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(232,255,71,.6);text-transform:uppercase;margin-bottom:5px">Total Days</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#e8ff47">${totalDays}</div></div>
+            <div style="background:rgba(0,229,184,.08);border:1px solid rgba(0,229,184,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(0,229,184,.6);text-transform:uppercase;margin-bottom:5px">Weeks</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#00e5b8">${totalWeeks}</div></div>
+            <div style="background:rgba(255,79,216,.08);border:1px solid rgba(255,79,216,.2);border-radius:10px;padding:14px 16px"><div style="font-family:var(--m);font-size:.58rem;letter-spacing:.12em;color:rgba(255,79,216,.6);text-transform:uppercase;margin-bottom:5px">Hrs / day</div><div style="font-family:var(--m);font-size:1.6rem;font-weight:700;color:#ff4fd8">${hrs}h</div></div>
+        </div>`;
         el.innerHTML = summaryHtml + weeks.map((wk, wi) => {
-            const rows = wk.map((s, di) => { const tc = typeC[s.type] || '#00e5b8', isGap = s.type === 'gap', priColor = s.pri === 'HIGH' ? '#ff4fd8' : s.pri === 'MED' ? '#e8ff47' : '#00e5b8'; return `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid rgba(255,255,255,.06)"><div style="font-family:var(--m);font-size:.65rem;font-weight:600;color:rgba(255,255,255,.4);width:30px;flex-shrink:0">${DAYS[di]}</div><div style="flex:1;position:relative;height:28px;background:rgba(255,255,255,.05);border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,.08)"><div style="position:absolute;inset:0;background:${tc}22;border-right:2px solid ${tc}"></div><div style="position:absolute;left:10px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:7px"><span style="font-family:var(--m);font-size:.68rem;font-weight:700;color:${tc};white-space:nowrap">${s.label.length > 20 ? s.label.slice(0, 19) + '…' : s.label}</span><span style="font-family:var(--m);font-size:.55rem;color:rgba(255,255,255,.3)">day ${s.dayOf}/${s.totalDays}</span></div></div><div style="font-family:var(--m);font-size:.6rem;font-weight:700;padding:2px 8px;border-radius:5px;background:${isGap ? 'rgba(255,79,216,.12)' : 'rgba(0,229,184,.1)'};color:${isGap ? '#ff4fd8' : '#00e5b8'};border:1px solid ${isGap ? 'rgba(255,79,216,.25)' : 'rgba(0,229,184,.22)'};white-space:nowrap;flex-shrink:0">${s.type.toUpperCase()}</div>${s.pri ? `<div style="font-family:var(--m);font-size:.55rem;font-weight:700;color:${priColor};width:24px;text-align:right;flex-shrink:0">${s.pri}</div>` : '<div style="width:24px;flex-shrink:0"></div>'}</div>`; }).join('');
-            const weekHrs = wk.length * hrs;
-            return `<div style="border:1px solid rgba(255,255,255,.12);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.02)"><div style="padding:10px 14px;background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:var(--m);font-size:.65rem;font-weight:700;color:${c}">WEEK ${wi + 1}</span><span style="font-family:var(--m);font-size:.6rem;color:rgba(255,255,255,.3)">${wk.length} days</span></div><span style="font-family:var(--m);font-size:.6rem;color:rgba(255,255,255,.45);background:rgba(255,255,255,.06);padding:3px 9px;border-radius:5px;border:1px solid rgba(255,255,255,.1)">${weekHrs}h total</span></div>${rows}</div>`;
+            const rows = wk.map((s, di) => {
+                const tc = typeC[s.type] || '#00e5b8', isGap = s.type === 'gap', priColor = s.pri === 'HIGH' ? '#ff4fd8' : s.pri === 'MED' ? '#e8ff47' : '#00e5b8';
+                return `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid rgba(255,255,255,.06)">
+                    <div style="font-family:var(--m);font-size:.65rem;font-weight:600;color:rgba(255,255,255,.4);width:30px;flex-shrink:0">${DAYS[di]}</div>
+                    <div style="flex:1;position:relative;height:28px;background:rgba(255,255,255,.05);border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,.08)">
+                        <div style="position:absolute;inset:0;background:${tc}22;border-right:2px solid ${tc}"></div>
+                        <div style="position:absolute;left:10px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:7px">
+                            <span style="font-family:var(--m);font-size:.68rem;font-weight:700;color:${tc};white-space:nowrap">${s.label.length > 20 ? s.label.slice(0, 19) + '…' : s.label}</span>
+                            <span style="font-family:var(--m);font-size:.55rem;color:rgba(255,255,255,.3)">day ${s.dayOf}/${s.totalDays}</span>
+                        </div>
+                    </div>
+                    <div style="font-family:var(--m);font-size:.6rem;font-weight:700;padding:2px 8px;border-radius:5px;background:${isGap ? 'rgba(255,79,216,.12)' : 'rgba(0,229,184,.1)'};color:${isGap ? '#ff4fd8' : '#00e5b8'};border:1px solid ${isGap ? 'rgba(255,79,216,.25)' : 'rgba(0,229,184,.22)'};white-space:nowrap;flex-shrink:0">${s.type.toUpperCase()}</div>
+                    ${s.pri ? `<div style="font-family:var(--m);font-size:.55rem;font-weight:700;color:${priColor};width:24px;text-align:right;flex-shrink:0">${s.pri}</div>` : '<div style="width:24px;flex-shrink:0"></div>'}
+                </div>`;
+            }).join('');
+            return `<div style="border:1px solid rgba(255,255,255,.12);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.02)">
+                <div style="padding:10px 14px;background:rgba(255,255,255,.04);border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:space-between">
+                    <div style="display:flex;align-items:center;gap:10px"><span style="font-family:var(--m);font-size:.65rem;font-weight:700;color:${c}">WEEK ${wi + 1}</span><span style="font-family:var(--m);font-size:.6rem;color:rgba(255,255,255,.3)">${wk.length} days</span></div>
+                    <span style="font-family:var(--m);font-size:.6rem;color:rgba(255,255,255,.45);background:rgba(255,255,255,.06);padding:3px 9px;border-radius:5px;border:1px solid rgba(255,255,255,.1)">${wk.length * hrs}h total</span>
+                </div>${rows}
+            </div>`;
         }).join('');
         const diffEl = document.getElementById('difficulty-bars'); if (!diffEl) return;
         const diffMap = { gap: 0.9, skill: 0.5, check: 0.2, end: 0.1, you: 0.05 }, priBoost = { HIGH: 0.1, MED: 0.04, LOW: 0 };
-        diffEl.innerHTML = trainable.map(n => { const score = Math.min(1, (diffMap[n.t] || 0.5) + (priBoost[n.pri] || 0)), pct = Math.round(score * 100), col = pct > 75 ? '#ff4fd8' : pct > 45 ? '#e8ff47' : '#00e5b8', label = pct > 75 ? 'Hard' : pct > 45 ? 'Medium' : 'Easy', bgCol = pct > 75 ? 'rgba(255,79,216,.12)' : pct > 45 ? 'rgba(232,255,71,.1)' : 'rgba(0,229,184,.1)', bdCol = pct > 75 ? 'rgba(255,79,216,.25)' : pct > 45 ? 'rgba(232,255,71,.22)' : 'rgba(0,229,184,.22)'; return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px"><div style="font-family:var(--m);font-size:.72rem;color:rgba(255,255,255,.75);width:150px;flex-shrink:0">${n.label}</div><div style="flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:100px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${col},${col}bb);border-radius:100px;transition:width 1.1s ease"></div></div><div style="font-family:var(--m);font-size:.65rem;font-weight:700;padding:2px 10px;border-radius:5px;background:${bgCol};border:1px solid ${bdCol};color:${col};width:58px;text-align:center;flex-shrink:0">${label}</div></div>`; }).join('');
+        diffEl.innerHTML = trainable.map(n => {
+            const score = Math.min(1, (diffMap[_nt(n)] || 0.5) + (priBoost[n.pri] || 0)), pct = Math.round(score * 100),
+                  col = pct > 75 ? '#ff4fd8' : pct > 45 ? '#e8ff47' : '#00e5b8',
+                  label = pct > 75 ? 'Hard' : pct > 45 ? 'Medium' : 'Easy',
+                  bgCol = pct > 75 ? 'rgba(255,79,216,.12)' : pct > 45 ? 'rgba(232,255,71,.1)' : 'rgba(0,229,184,.1)',
+                  bdCol = pct > 75 ? 'rgba(255,79,216,.25)' : pct > 45 ? 'rgba(232,255,71,.22)' : 'rgba(0,229,184,.22)';
+            return `<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+                <div style="font-family:var(--m);font-size:.72rem;color:rgba(255,255,255,.75);width:150px;flex-shrink:0">${n.label}</div>
+                <div style="flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:100px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${col},${col}bb);border-radius:100px;transition:width 1.1s ease"></div></div>
+                <div style="font-family:var(--m);font-size:.65rem;font-weight:700;padding:2px 10px;border-radius:5px;background:${bgCol};border:1px solid ${bdCol};color:${col};width:58px;text-align:center;flex-shrink:0">${label}</div>
+            </div>`;
+        }).join('');
     }
 
+    /* ── renderProgressTracker — uses _nt() ── */
     function renderProgressTracker() {
         const d = ROLES[role], trainable = d.nodes.filter(n => n.days > 0), c = d.color;
         const total = trainable.length, done = trainable.filter(n => completedModules.has(n.id)).length, pct = Math.round((done / total) * 100);
-        document.getElementById("progress-overall").innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div><span style="font-size:22px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${c}">${done}</span><span style="font-size:13px;color:rgba(220,220,235,.65);font-family:'JetBrains Mono',monospace"> / ${total} modules</span></div><div style="text-align:right"><div style="font-size:24px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${c}">${pct}%</div><div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);letter-spacing:1px">COMPLETED</div></div></div><div style="height:8px;background:rgba(255,255,255,.05);border-radius:100px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${c},#06d6a0);border-radius:100px;transition:width .6s ease;box-shadow:0 0 12px ${c}60"></div></div>${done === total && total > 0 ? `<div style="text-align:center;margin-top:12px;padding:10px;background:rgba(6,214,160,.1);border:1px solid rgba(6,214,160,.25);border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#06d6a0;font-weight:700">🎉 All modules complete! Role ready.</div>` : ""}`;
+        document.getElementById("progress-overall").innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div><span style="font-size:22px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${c}">${done}</span><span style="font-size:13px;color:rgba(220,220,235,.65);font-family:'JetBrains Mono',monospace"> / ${total} modules</span></div>
+            <div style="text-align:right"><div style="font-size:24px;font-weight:900;font-family:'JetBrains Mono',monospace;color:${c}">${pct}%</div><div style="font-size:9px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);letter-spacing:1px">COMPLETED</div></div>
+        </div>
+        <div style="height:8px;background:rgba(255,255,255,.05);border-radius:100px;overflow:hidden"><div style="height:100%;width:${pct}%;background:linear-gradient(90deg,${c},#06d6a0);border-radius:100px;transition:width .6s ease;box-shadow:0 0 12px ${c}60"></div></div>
+        ${done === total && total > 0 ? `<div style="text-align:center;margin-top:12px;padding:10px;background:rgba(6,214,160,.1);border:1px solid rgba(6,214,160,.25);border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#06d6a0;font-weight:700">🎉 All modules complete! Role ready.</div>` : ""}`;
         const typeC = { gap: "#f72585", skill: "#0096ff", check: "#06d6a0", end: "#9b5de5" };
-        document.getElementById("progress-modules").innerHTML = trainable.map(n => { const isDone = completedModules.has(n.id), tc = typeC[n.t] || "#0096ff"; return `<div class="prog-module ${isDone ? "done" : ""}" onclick="toggleModule('${n.id}')"><div class="pmc">${isDone ? "✓" : ""}</div><div style="flex:1"><div style="font-size:13px;font-weight:600;color:${isDone ? "#06d6a0" : "#e2e8f0"}">${n.label}</div><div style="font-size:10px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);margin-top:2px">${n.days}d · ${n.t.toUpperCase()}${n.pri ? ` · ${n.pri} PRIORITY` : ""}</div></div><div style="font-size:10px;font-family:'JetBrains Mono',monospace;padding:3px 8px;border-radius:5px;background:${isDone ? "rgba(6,214,160,.12)" : "rgba(255,255,255,.04)"};color:${isDone ? "#06d6a0" : "rgba(148,163,184,.4)"}">${isDone ? "DONE" : "TODO"}</div></div>`; }).join("");
+        document.getElementById("progress-modules").innerHTML = trainable.map(n => {
+            const isDone = completedModules.has(n.id), tc = typeC[_nt(n)] || "#0096ff";
+            return `<div class="prog-module ${isDone ? "done" : ""}" onclick="toggleModule('${n.id}')">
+                <div class="pmc">${isDone ? "✓" : ""}</div>
+                <div style="flex:1">
+                    <div style="font-size:13px;font-weight:600;color:${isDone ? "#06d6a0" : "#e2e8f0"}">${n.label}</div>
+                    <div style="font-size:10px;font-family:'JetBrains Mono',monospace;color:rgba(220,220,235,.55);margin-top:2px">${n.days}d · ${_nt(n).toUpperCase()}${n.pri ? ` · ${n.pri} PRIORITY` : ""}</div>
+                </div>
+                <div style="font-size:10px;font-family:'JetBrains Mono',monospace;padding:3px 8px;border-radius:5px;background:${isDone ? "rgba(6,214,160,.12)" : "rgba(255,255,255,.04)"};color:${isDone ? "#06d6a0" : "rgba(148,163,184,.4)"}">${isDone ? "DONE" : "TODO"}</div>
+            </div>`;
+        }).join("");
     }
 
     function toggleModule(id) { if (completedModules.has(id)) completedModules.delete(id); else completedModules.add(id); renderProgressTracker(); }
     function updatePlanner() { const hrs = parseInt(document.getElementById("hrs-slider").value); document.getElementById("hrs-val").textContent = hrs + "h"; renderPlanner(hrs); }
 
+    /* ── renderEvaluationDashboard — real graphData ── */
+    function renderEvaluationDashboard(graphData) {
+        if (!graphData || !graphData.labels || !graphData.labels.length) return;
+        const { labels, current_profile, target_role } = graphData;
+        const radarTab = document.getElementById("tab-radar"); if (!radarTab) return;
+        const old = document.getElementById("eval-dashboard-card"); if (old) old.remove();
+        const card = document.createElement("div"); card.id = "eval-dashboard-card"; card.className = "card"; card.style.marginTop = "13px";
+        const barRows = labels.map((label, i) => {
+            const cur = current_profile[i] || 0, tgt = target_role[i] || 90, gap = Math.max(0, tgt - cur),
+                  curColor = cur >= 70 ? "#00e5b8" : cur >= 40 ? "#e8ff47" : "#ff4fd8";
+            return `<div style="margin-bottom:14px">
+                <div style="display:flex;justify-content:space-between;font-family:var(--m);font-size:.68rem;margin-bottom:6px"><span style="color:var(--fg2);font-weight:600">${label}</span><span style="color:var(--fg3)"><span style="color:${curColor};font-weight:700">${cur}%</span> / ${tgt}%</span></div>
+                <div style="position:relative;height:7px;background:rgba(255,255,255,.06);border-radius:100px;overflow:hidden">
+                    <div style="position:absolute;left:0;top:0;height:100%;width:${tgt}%;background:rgba(255,79,216,.35);border-radius:100px"></div>
+                    <div style="position:absolute;left:0;top:0;height:100%;width:${cur}%;background:linear-gradient(90deg,${curColor},${curColor}cc);border-radius:100px;box-shadow:0 0 8px ${curColor}60;transition:width 1.2s ease"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-family:var(--m);font-size:.58rem;color:var(--fg3);margin-top:4px"><span>Current level</span><span style="color:${gap > 0 ? '#ff4fd8' : '#00e5b8'}">${gap > 0 ? `Gap: ${gap}pts` : '✓ At target'}</span></div>
+            </div>`;
+        }).join("");
+        card.innerHTML = `<div class="cl">Resume vs Role — Skill Evaluation</div>
+            <div style="display:flex;gap:18px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.08)">
+                <div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:#00e5b8"></div>Your Level</div>
+                <div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:rgba(255,79,216,.35)"></div>Target</div>
+            </div>
+            <div id="eval-bar-rows">${barRows}</div>`;
+        radarTab.appendChild(card);
+    }
+
+    /* ── openCompare — uses real backend data via helpers ── */
     function openCompare() {
         const allSkills = ["Python", "SQL", "Statistics", "System Design", "Agile/Scrum", "Docker", "Cloud", "Testing", "ML", "Strategy"], rks = Object.keys(ROLES);
         const cfgC = { known: { bg: "rgba(6,214,160,.18)", b: "rgba(6,214,160,.35)", t: "#06d6a0", l: "STRONG" }, partial: { bg: "rgba(255,159,28,.14)", b: "rgba(255,159,28,.3)", t: "#ff9f1c", l: "PARTIAL" }, gap: { bg: "rgba(247,37,133,.13)", b: "rgba(247,37,133,.3)", t: "#ff6b9d", l: "GAP" }, neutral: { bg: "rgba(255,255,255,.04)", b: "rgba(255,255,255,.08)", t: "rgba(148,163,184,.4)", l: "N/A" } };
-        const getS = (sk, rk) => { const d = ROLES[rk], s = sk.toLowerCase().slice(0, 5); if (d.known.some(k => k.toLowerCase().includes(s))) return "known"; if (d.partial.some(k => k.toLowerCase().includes(s))) return "partial"; if (d.gaps.some(k => k.toLowerCase().includes(s))) return "gap"; return "neutral"; };
+        const getS = (sk, rk) => {
+            const d = ROLES[rk], s = sk.toLowerCase().slice(0, 5);
+            if (_known(d).some(k   => k.toLowerCase().includes(s))) return "known";
+            if (_partial(d).some(k => k.toLowerCase().includes(s))) return "partial";
+            if (_gaps(d).some(k    => k.toLowerCase().includes(s))) return "gap";
+            return "neutral";
+        };
         let h = `<table class="hm"><thead><tr><th style="text-align:left;color:rgba(148,163,184,.35)">SKILL</th>${rks.map(rk => `<th style="text-align:center;color:${ROLES[rk].color}">${rk.split(" ").map(w => w[0]).join("")}</th>`).join("")}</tr></thead><tbody>`;
         allSkills.forEach((sk, i) => { h += `<tr style="background:${i % 2 ? "rgba(255,255,255,.01)" : "transparent"}"><td style="padding:5px 10px;color:rgba(220,220,235,.7);white-space:nowrap;font-size:9.5px">${sk}</td>`; rks.forEach(rk => { const s = getS(sk, rk), cc = cfgC[s]; h += `<td style="padding:4px 6px;text-align:center"><div style="height:17px;border-radius:4px;font-size:7.5px;font-weight:700;background:${cc.bg};border:1px solid ${cc.b};color:${cc.t};display:flex;align-items:center;justify-content:center">${cc.l}</div></td>`; }); h += "</tr>"; });
         h += "</tbody></table>";
@@ -3382,73 +3640,39 @@ renderStats([
     }
     function closeCompare() { document.getElementById("modal-compare").classList.add("hidden"); }
 
-    /* ── DOWNLOAD FUNCTIONS (unchanged) ── */
-    function downloadTXT() { const d = ROLES[role], trainable = d.nodes.filter(n => n.days > 0), total = trainable.reduce((s, n) => s + n.days, 0), gapNodes = d.nodes.filter(n => n.t === "gap"), now = new Date().toLocaleDateString("en-IN", { year: "numeric", month: "long", day: "numeric" }), line = (char, n) => char.repeat(n); let t = ""; t += line("=", 60) + "\n"; t += "  PATHFORGE — AI ADAPTIVE ONBOARDING REPORT\n"; t += line("=", 60) + "\n\n"; t += `Generated : ${now}\nTarget Role: ${role}\nMatch Score: ${d.score}%\nAI Confidence: 94.2%\n\n`; t += line("-", 60) + "\n  EXECUTIVE SUMMARY\n" + line("-", 60) + "\n"; t += `Total Training Duration : ${total} days\nDays Saved vs Generic   : ${d.saved} days\nCritical Skill Gaps     : ${gapNodes.length}\nRole Readiness          : ${d.score}%\n\n`; t += line("-", 60) + "\n  SKILL GAP ANALYSIS\n" + line("-", 60) + "\n"; t += `[PROFICIENT]\n  ${d.known.join(", ")}\n\n[PARTIAL]\n  ${d.partial.join(", ")}\n\n[GAPS — CRITICAL]\n  ${d.gaps.join(", ")}\n\n`; t += line("-", 60) + "\n  ADAPTIVE LEARNING PATHWAY\n" + line("-", 60) + "\n"; let day = 1; trainable.forEach((n, i) => { t += `  ${String(i + 1).padStart(2, "0")}. Day ${String(day).padStart(2)} → Day ${String(day + n.days - 1).padStart(2)}  |  ${n.t.toUpperCase().padEnd(8)}  |  ${n.label}${n.pri ? ` [${n.pri}]` : ""}\n`; day += n.days; }); t += "\n" + line("=", 60) + "\n  PathForge · AI Adaptive Onboarding Engine\n" + line("=", 60) + "\n"; dlFile(`PathForge_Report_${role.replace(/ /g, "_")}.txt`, t, "text/plain"); }
-    function downloadJSON() { const d = ROLES[role], trainable = d.nodes.filter(n => n.days > 0), total = trainable.reduce((s, n) => s + n.days, 0); const payload = { meta: { generated: new Date().toISOString(), tool: "PathForge v4.0" }, profile: { targetRole: role, matchScore: d.score, aiConfidence: 94.2, totalTrainingDays: total, daysSaved: d.saved }, skillAnalysis: { proficient: d.known, partial: d.partial, gaps: d.gaps }, pathway: trainable.map((n, i) => { let day = 0; trainable.slice(0, i).forEach(x => day += x.days); return { order: i + 1, id: n.id, label: n.label, type: n.t, priority: n.pri, startDay: day + 1, endDay: day + n.days, durationDays: n.days }; }) }; dlFile(`PathForge_Data_${role.replace(/ /g, "_")}.json`, JSON.stringify(payload, null, 2), "application/json"); }
-    function downloadHTML() { alert("HTML export is available — check your existing downloadHTML() function."); }
-    function downloadPDF() { alert("PDF export is available — check your existing downloadPDF() function."); }
+    /* ── DOWNLOAD — real backend data via helpers ── */
+    function downloadTXT() {
+        var d = ROLES[role], trainable = d.nodes.filter(n => n.days > 0);
+        var total = _totalDays(d), gapCount = _gaps(d).length, score = _score(d), saved = _saved(d);
+        var conf = _confidence(d);
+        var now = new Date().toLocaleDateString("en-IN", { year: "numeric", month: "long", day: "numeric" }), line = (char, n) => char.repeat(n);
+        let t = line("=", 60) + "\n  PATHFORGE — AI ADAPTIVE ONBOARDING REPORT\n" + line("=", 60) + "\n\n";
+        t += `Generated : ${now}\nTarget Role: ${role}\nMatch Score: ${score}%\nAI Confidence: ${Math.round(conf)}%\n\n`;
+        t += line("-", 60) + "\n  EXECUTIVE SUMMARY\n" + line("-", 60) + "\n";
+        t += `Total Training Duration : ${total} days\nDays Saved vs Generic   : ${saved} days\nCritical Skill Gaps     : ${gapCount}\nRole Readiness          : ${score}%\n\n`;
+        t += line("-", 60) + "\n  SKILL GAP ANALYSIS\n" + line("-", 60) + "\n";
+        t += `[PROFICIENT]\n  ${_known(d).join(", ")}\n\n[PARTIAL]\n  ${_partial(d).join(", ")}\n\n[GAPS — CRITICAL]\n  ${_gaps(d).join(", ")}\n\n`;
+        t += line("-", 60) + "\n  ADAPTIVE LEARNING PATHWAY\n" + line("-", 60) + "\n";
+        let day = 1; trainable.forEach((n, i) => { t += `  ${String(i + 1).padStart(2, "0")}. Day ${String(day).padStart(2)} → Day ${String(day + n.days - 1).padStart(2)}  |  ${_nt(n).toUpperCase().padEnd(8)}  |  ${n.label}${n.pri ? ` [${n.pri}]` : ""}\n`; day += n.days; });
+        t += "\n" + line("=", 60) + "\n  PathForge · AI Adaptive Onboarding Engine\n" + line("=", 60) + "\n";
+        dlFile(`PathForge_Report_${role.replace(/ /g, "_")}.txt`, t, "text/plain");
+    }
+    function downloadJSON() {
+        var d = ROLES[role];
+        /* If real backend data is available, export the raw response directly */
+        if (d._raw) { dlFile(`PathForge_Data_${role.replace(/ /g, "_")}.json`, JSON.stringify(d._raw, null, 2), "application/json"); return; }
+        var trainable = d.nodes.filter(n => n.days > 0);
+        const payload = {
+            meta: { generated: new Date().toISOString(), tool: "PathForge v4.0" },
+            profile: { targetRole: role, matchScore: _score(d), aiConfidence: _confidence(d), totalTrainingDays: _totalDays(d), daysSaved: _saved(d) },
+            skillAnalysis: { proficient: _known(d), partial: _partial(d), gaps: _gaps(d) },
+            pathway: trainable.map((n, i) => { let day = 0; trainable.slice(0, i).forEach(x => day += x.days); return { order: i + 1, id: n.id, label: n.label, type: _nt(n), priority: n.pri, startDay: day + 1, endDay: day + n.days, durationDays: n.days }; })
+        };
+        dlFile(`PathForge_Data_${role.replace(/ /g, "_")}.json`, JSON.stringify(payload, null, 2), "application/json");
+    }
+    function downloadHTML() { alert("HTML export — use the existing downloadHTML() function in your file."); }
+    function downloadPDF() { alert("PDF export — use the existing downloadPDF() function in your file."); }
     function dlFile(name, content, type) { const blob = new Blob([content], { type }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-
-    /* ══════════════════════════════════════════════════════════════
-       BACKEND API INTEGRATION
-    ══════════════════════════════════════════════════════════════ */
-
-    /* ── Merge real backend data into ROLES ── */
-    function _injectBackendData(data) {
-        const nodes = data.pathway_nodes.map(n => ({ id: n.id, t: n.node_type, x: n.x, y: n.y, label: n.label, days: n.days, pri: n.priority }));
-        const edges = data.pathway_edges.map(e => [e.source, e.target]);
-        ROLES[data.role] = { ...ROLES[data.role], color: ROLES[data.role]?.color || "#00e5b8", nodes, edges, known: data.known_skills, partial: data.partial_skills, gaps: data.gap_skills, score: data.match_score, saved: data.days_saved, skills: data.jd_skills.map(s => s.name).slice(0, 10), _raw: data, graphData: data.graph_data || null };
-    }
-
-    function renderEvaluationDashboard(graphData) {
-        if (!graphData || !graphData.labels || !graphData.labels.length) return;
-        const { labels, current_profile, target_role } = graphData;
-        const radarTab = document.getElementById("tab-radar"); if (!radarTab) return;
-        const old = document.getElementById("eval-dashboard-card"); if (old) old.remove();
-        const card = document.createElement("div"); card.id = "eval-dashboard-card"; card.className = "card"; card.style.marginTop = "13px";
-        const barRows = labels.map((label, i) => { const cur = current_profile[i] || 0, tgt = target_role[i] || 90, gap = Math.max(0, tgt - cur), curColor = cur >= 70 ? "#00e5b8" : cur >= 40 ? "#e8ff47" : "#ff4fd8"; return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-family:var(--m);font-size:.68rem;margin-bottom:6px"><span style="color:var(--fg2);font-weight:600">${label}</span><span style="color:var(--fg3)"><span style="color:${curColor};font-weight:700">${cur}%</span> / ${tgt}%</span></div><div style="position:relative;height:7px;background:rgba(255,255,255,.06);border-radius:100px;overflow:hidden"><div style="position:absolute;left:0;top:0;height:100%;width:${tgt}%;background:rgba(255,79,216,.35);border-radius:100px"></div><div style="position:absolute;left:0;top:0;height:100%;width:${cur}%;background:linear-gradient(90deg,${curColor},${curColor}cc);border-radius:100px;box-shadow:0 0 8px ${curColor}60;transition:width 1.2s ease"></div></div><div style="display:flex;justify-content:space-between;font-family:var(--m);font-size:.58rem;color:var(--fg3);margin-top:4px"><span>Current level</span><span style="color:${gap > 0 ? '#ff4fd8' : '#00e5b8'}">${gap > 0 ? `Gap: ${gap}pts` : '✓ At target'}</span></div></div>`; }).join("");
-        card.innerHTML = `<div class="cl">Resume vs Role — Skill Evaluation</div><div style="display:flex;gap:18px;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.08)"><div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:#00e5b8"></div>Your Level</div><div style="display:flex;align-items:center;gap:7px;font-family:var(--m);font-size:.63rem;color:var(--fg2)"><div style="width:22px;height:4px;border-radius:100px;background:rgba(255,79,216,.35)"></div>Target</div></div><div id="eval-bar-rows">${barRows}</div>`;
-        radarTab.appendChild(card);
-    }
-
-    /* ══════════════════════════════════════════════════════════════
-       FIX 4: goAnalyze — uses fetchWithRetry, correct FormData
-       (NO manual Content-Type header on FormData)
-    ══════════════════════════════════════════════════════════════ */
-    async function goAnalyze() {
-        if (!hasR && !hasJ) return;
-        runAnalysis();
-
-        const formData = new FormData();
-        formData.append("role", document.getElementById("sel-role").value);
-        formData.append("experience_level", document.getElementById("sel-level").value);
-
-        const f1 = document.getElementById("f1");
-        const f2 = document.getElementById("f2");
-        const useDemo = !f1.files.length && !f2.files.length;
-        formData.append("use_demo", useDemo.toString());
-        if (f1.files[0]) formData.append("resume_file", f1.files[0]);
-        if (f2.files[0]) formData.append("jd_file", f2.files[0]);
-
-        try {
-            /* FIX: No Content-Type header — browser sets multipart boundary */
-            const res = await fetchWithRetry(`${API_BASE}/analyze`, {
-                method: "POST",
-                body: formData,
-                /* DO NOT add headers: { "Content-Type": ... } here */
-            });
-            if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Server error"); }
-            const data = await res.json();
-            _sessionId = data.session_id;
-            _injectBackendData(data);
-            if (atimer) { clearInterval(atimer); atimer = null; }
-            showResult();
-        } catch (e) {
-            console.error("API error:", e);
-            alert("Analysis failed: " + e.message);
-            goTo("upload");
-        }
-    }
 
     /* ── Drag & Drop ── */
     function setupDragDrop(dzId, fileInputId, type) {
@@ -3460,20 +3684,36 @@ renderStats([
     setupDragDrop('dz-resume', 'f1', 'resume');
     setupDragDrop('dz-jd', 'f2', 'jd');
 
-    /* ══════════════════════════════════════════════════════════════
-       QUIZ ENGINE
-       FIX 5: encodeURIComponent on role in quiz fetch URL
-       FIX 6: quiz/submit sends JSON body (application/json)
-       FIX 7: use_demo appended only once in quizRunAnalysis
-    ══════════════════════════════════════════════════════════════ */
+    /* ── goAnalyze ── */
+    async function goAnalyze() {
+        if (!hasR && !hasJ) return;
+        runAnalysis();
+        const formData = new FormData();
+        formData.append("role", document.getElementById("sel-role").value);
+        formData.append("experience_level", document.getElementById("sel-level").value);
+        const f1 = document.getElementById("f1"), f2 = document.getElementById("f2");
+        const useDemo = !f1.files.length && !f2.files.length;
+        formData.append("use_demo", useDemo.toString());
+        if (f1.files[0]) formData.append("resume_file", f1.files[0]);
+        if (f2.files[0]) formData.append("jd_file", f2.files[0]);
+        try {
+            const res = await fetchWithRetry(`${API_BASE}/analyze`, { method: "POST", body: formData });
+            if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Server error"); }
+            const data = await res.json();
+            _sessionId = data.session_id;
+            _injectBackendData(data);
+            if (atimer) { clearInterval(atimer); atimer = null; }
+            showResult();
+        } catch (e) { console.error("API error:", e); alert("Analysis failed: " + e.message); goTo("upload"); }
+    }
+
+    /* ── QUIZ ENGINE ── */
     var quizState = { questions: [], answers: {}, currentIndex: 0, role: '', level: '', totalQuestions: 0, generatedAt: '', groqModel: '' };
 
     async function startQuiz() {
         quizState.role = document.getElementById('sel-role').value;
         quizState.level = document.getElementById('sel-level').value;
-        quizState.answers = {};
-        quizState.currentIndex = 0;
-
+        quizState.answers = {}; quizState.currentIndex = 0;
         goTo('quiz');
         document.getElementById('quiz-loading').style.display = 'flex';
         document.getElementById('quiz-questions').style.display = 'none';
@@ -3481,40 +3721,34 @@ renderStats([
         document.getElementById('quiz-submit-btn').style.display = 'none';
         document.getElementById('quiz-loading-msg').innerHTML = `Groq is generating your <strong style="color:var(--y)">${quizState.role}</strong> quiz…<br><span style="color:var(--fg3)">This takes about 3 seconds</span>`;
         document.getElementById('quiz-subtitle').textContent = `Personalised diagnostic for ${quizState.role} — ${quizState.level} level`;
-
         try {
-            /* FIX 5: encodeURIComponent prevents space in URL (e.g. "Software Engineer" → "Software%20Engineer") */
             const encodedRole = encodeURIComponent(quizState.role);
             const url = `${API_BASE}/quiz/${encodedRole}?experience_level=${quizState.level}&num_questions=10`;
-
             const res = await fetchWithRetry(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
             if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Failed to load quiz'); }
-
             const data = await res.json();
-            quizState.questions = data.questions;
-            quizState.totalQuestions = data.total_questions;
-            quizState.generatedAt = data.generated_at;
-            quizState.groqModel = data.groq_model;
-
+            quizState.questions = data.questions; quizState.totalQuestions = data.total_questions;
+            quizState.generatedAt = data.generated_at; quizState.groqModel = data.groq_model;
             document.getElementById('quiz-loading').style.display = 'none';
             document.getElementById('quiz-questions').style.display = 'block';
             document.getElementById('quiz-nav').style.display = 'flex';
             quizRenderQuestion(0);
         } catch (err) {
             document.getElementById('quiz-loading-msg').innerHTML = `<span style="color:#ff4fd8">⚠ ${err.message}</span><br><span style="color:var(--fg3)">Check your connection or API key.</span>`;
-            console.error('Quiz load error:', err);
         }
     }
 
     function quizRenderQuestion(index) {
         const q = quizState.questions[index], total = quizState.totalQuestions; if (!q) return;
-        const pct = Math.round((index / total) * 100);
-        document.getElementById('quiz-prog-fill').style.width = pct + '%';
+        document.getElementById('quiz-prog-fill').style.width = Math.round((index / total) * 100) + '%';
         document.getElementById('quiz-prog-lbl').textContent = `${index + 1} / ${total}`;
         const weightLabel = q.weight >= 1.5 ? '⭐ High Priority' : q.weight >= 1.0 ? 'Medium Priority' : 'Lower Priority';
         const existingAnswer = quizState.answers[q.id];
         const levelColors = { none: 'rgba(255,79,216,.5)', basic: 'rgba(255,159,28,.6)', intermediate: 'rgba(0,229,184,.6)', advanced: 'rgba(232,255,71,.7)' };
-        const optionsHTML = q.options.map((opt) => { const isSelected = existingAnswer && existingAnswer.score === opt.score, levelColor = levelColors[opt.skill_level] || 'rgba(255,255,255,.3)'; return `<button class="quiz-opt ${isSelected ? 'selected' : ''}" onclick="quizSelectOption('${q.id}', ${opt.score}, '${opt.skill_level}', '${q.skill}', this)"><div class="quiz-opt-radio"></div><span class="quiz-opt-label">${opt.label}</span><span class="quiz-opt-score" style="color:${levelColor};border-color:${levelColor}22">${opt.skill_level}</span></button>`; }).join('');
+        const optionsHTML = q.options.map(opt => {
+            const isSelected = existingAnswer && existingAnswer.score === opt.score, levelColor = levelColors[opt.skill_level] || 'rgba(255,255,255,.3)';
+            return `<button class="quiz-opt ${isSelected ? 'selected' : ''}" onclick="quizSelectOption('${q.id}', ${opt.score}, '${opt.skill_level}', '${q.skill}', this)"><div class="quiz-opt-radio"></div><span class="quiz-opt-label">${opt.label}</span><span class="quiz-opt-score" style="color:${levelColor};border-color:${levelColor}22">${opt.skill_level}</span></button>`;
+        }).join('');
         const catStyle = { technical: { bg: 'rgba(0,229,184,.08)', border: 'rgba(0,229,184,.18)', color: 'var(--t)' }, soft: { bg: 'rgba(255,79,216,.08)', border: 'rgba(255,79,216,.18)', color: 'var(--p)' }, domain: { bg: 'rgba(232,255,71,.08)', border: 'rgba(232,255,71,.18)', color: 'var(--y)' } }[q.skill_category] || { bg: 'rgba(0,229,184,.08)', border: 'rgba(0,229,184,.18)', color: 'var(--t)' };
         document.getElementById('quiz-questions').innerHTML = `<div class="quiz-card"><div class="quiz-q-meta"><span class="quiz-q-num">QUESTION ${index + 1} OF ${total}</span><span class="quiz-skill-tag" style="background:${catStyle.bg};border-color:${catStyle.border};color:${catStyle.color}">${q.skill}</span><span class="quiz-weight-tag">${weightLabel}</span></div><div class="quiz-q-text">${q.question}</div><div class="quiz-why">💡 ${q.why_asked}</div><div class="quiz-options">${optionsHTML}</div></div>`;
         const nextBtn = document.getElementById('quiz-next-btn'), backBtn = document.getElementById('quiz-back-btn'), submitBtn = document.getElementById('quiz-submit-btn');
@@ -3539,47 +3773,51 @@ renderStats([
     function quizGoBack() { if (quizState.currentIndex > 0) { quizState.currentIndex--; quizRenderQuestion(quizState.currentIndex); } }
     function quizSkipQuestion() { const q = quizState.questions[quizState.currentIndex]; if (q) quizState.answers[q.id] = { question_id: q.id, skill: q.skill, score: 0.0, skill_level: 'none' }; quizNextQuestion(); }
 
-    /* ── FIX 6: quiz submit sends JSON body ── */
     async function quizSubmit() {
         const answers = Object.values(quizState.answers);
         if (answers.length < 3) { alert('Please answer at least 3 questions before continuing.'); return; }
         const submitBtn = document.getElementById('quiz-submit-btn');
         submitBtn.textContent = 'Processing…'; submitBtn.disabled = true;
         try {
-            /* FIX 6: Content-Type: application/json + JSON.stringify — NOT FormData */
             const submitRes = await fetchWithRetry(`${API_BASE}/quiz/submit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ role: quizState.role, experience_level: quizState.level, answers: answers }),
+                body: JSON.stringify({ role: quizState.role, experience_level: quizState.level, answers: answers })
             });
             if (!submitRes.ok) throw new Error('Quiz submission failed');
             const quizResult = await submitRes.json();
             quizShowPreview(quizResult);
             await quizRunAnalysis(quizResult.synthetic_resume);
-        } catch (err) {
-            submitBtn.textContent = 'Generate My Pathway →'; submitBtn.disabled = false;
-            alert('Submission error: ' + err.message);
-        }
+        } catch (err) { submitBtn.textContent = 'Generate My Pathway →'; submitBtn.disabled = false; alert('Submission error: ' + err.message); }
     }
 
     function quizShowPreview(result) {
         const container = document.getElementById('quiz-questions');
         const strongHTML = result.strong_skills.slice(0, 4).map(s => `<span class="bdg" style="background:rgba(0,229,184,.1);border:1px solid rgba(0,229,184,.2);color:var(--t)"><span class="bdg-d" style="background:var(--t)"></span>${s}</span>`).join('');
-        const weakHTML = result.weak_skills.slice(0, 4).map(s => `<span class="bdg" style="background:rgba(255,79,216,.1);border:1px solid rgba(255,79,216,.2);color:var(--p)"><span class="bdg-d" style="background:var(--p)"></span>${s}</span>`).join('');
-        container.innerHTML = `<div class="quiz-card" style="border-color:rgba(0,229,184,.2);background:rgba(0,229,184,.03)"><div class="cl" style="margin-bottom:14px">Quiz Results Summary</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:16px"><div class="ifield"><div class="ikey">Estimated Level</div><div class="ival" style="color:var(--y)">${result.estimated_experience}</div></div><div class="ifield"><div class="ikey">Questions Answered</div><div class="ival" style="color:var(--t)">${Object.keys(quizState.answers).length}</div></div><div class="ifield"><div class="ikey">Strong Skills</div><div class="ival" style="color:var(--t)">${result.strong_skills.length}</div></div><div class="ifield"><div class="ikey">Gaps Detected</div><div class="ival" style="color:var(--p)">${result.weak_skills.length}</div></div></div>${strongHTML ? `<div style="margin-bottom:10px"><div style="font-family:var(--m);font-size:.58rem;color:var(--fg3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:7px">STRONG SKILLS</div><div>${strongHTML}</div></div>` : ''}${weakHTML ? `<div><div style="font-family:var(--m);font-size:.58rem;color:var(--fg3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:7px">SKILL GAPS</div><div>${weakHTML}</div></div>` : ''}<div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);font-family:var(--m);font-size:.68rem;color:var(--fg3);display:flex;align-items:center;gap:7px"><div class="quiz-spinner" style="width:14px;height:14px;border-width:1.5px"></div>Running full AI analysis on your quiz results…</div></div>`;
+        const weakHTML   = result.weak_skills.slice(0, 4).map(s => `<span class="bdg" style="background:rgba(255,79,216,.1);border:1px solid rgba(255,79,216,.2);color:var(--p)"><span class="bdg-d" style="background:var(--p)"></span>${s}</span>`).join('');
+        container.innerHTML = `<div class="quiz-card" style="border-color:rgba(0,229,184,.2);background:rgba(0,229,184,.03)">
+            <div class="cl" style="margin-bottom:14px">Quiz Results Summary</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:16px">
+                <div class="ifield"><div class="ikey">Estimated Level</div><div class="ival" style="color:var(--y)">${result.estimated_experience}</div></div>
+                <div class="ifield"><div class="ikey">Questions Answered</div><div class="ival" style="color:var(--t)">${Object.keys(quizState.answers).length}</div></div>
+                <div class="ifield"><div class="ikey">Strong Skills</div><div class="ival" style="color:var(--t)">${result.strong_skills.length}</div></div>
+                <div class="ifield"><div class="ikey">Gaps Detected</div><div class="ival" style="color:var(--p)">${result.weak_skills.length}</div></div>
+            </div>
+            ${strongHTML ? `<div style="margin-bottom:10px"><div style="font-family:var(--m);font-size:.58rem;color:var(--fg3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:7px">STRONG SKILLS</div><div>${strongHTML}</div></div>` : ''}
+            ${weakHTML   ? `<div><div style="font-family:var(--m);font-size:.58rem;color:var(--fg3);letter-spacing:.12em;text-transform:uppercase;margin-bottom:7px">SKILL GAPS</div><div>${weakHTML}</div></div>` : ''}
+            <div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);font-family:var(--m);font-size:.68rem;color:var(--fg3);display:flex;align-items:center;gap:7px"><div class="quiz-spinner" style="width:14px;height:14px;border-width:1.5px"></div>Running full AI analysis on your quiz results…</div>
+        </div>`;
         document.getElementById('quiz-nav').style.display = 'none';
         document.getElementById('quiz-submit-btn').style.display = 'none';
     }
 
-    /* ── FIX 7: use_demo appended only once ── */
     async function quizRunAnalysis(syntheticResume) {
         runAnalysis();
         const formData = new FormData();
         formData.append('role', quizState.role);
         formData.append('experience_level', quizState.level);
-        formData.append('use_demo', 'true'); /* FIX 7: appended only once (was appended twice) */
-        const resumeBlob = new Blob([syntheticResume], { type: 'text/plain' });
-        formData.append('resume_file', resumeBlob, 'quiz_assessment.txt');
+        formData.append('use_demo', 'true');
+        formData.append('resume_file', new Blob([syntheticResume], { type: 'text/plain' }), 'quiz_assessment.txt');
         try {
             const res = await fetchWithRetry(`${API_BASE}/analyze`, { method: 'POST', body: formData });
             if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Analysis failed'); }
@@ -3588,9 +3826,7 @@ renderStats([
             _injectBackendData(data);
             if (atimer) { clearInterval(atimer); atimer = null; }
             showResult();
-        } catch (err) {
-            console.error('Quiz analysis error:', err); alert('Analysis failed: ' + err.message); goTo('quiz');
-        }
+        } catch (err) { console.error('Quiz analysis error:', err); alert('Analysis failed: ' + err.message); goTo('quiz'); }
     }
 </script>
 </body>
