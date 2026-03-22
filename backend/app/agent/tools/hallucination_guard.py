@@ -52,10 +52,12 @@ class HallucinationGuard:
         self._emb = EmbeddingService.get()
 
     def verify(
-        self,
-        nodes: list[PathwayNode],
-        resume_text: str,
-        jd_text: str,
+          self,
+          nodes: list[PathwayNode],
+          source_texts=None,
+          resume_text: str = "",
+          jd_text: str = "",
+          **kwargs,
     ) -> GuardReport:  # FIX: return type was HallucinationGuardReport
         """
         Check every skill node against known sources.
@@ -65,7 +67,12 @@ class HallucinationGuard:
         onet_db = load_onet_skills()
         catalog = _load_course_catalog()
 
-        source_text = (resume_text + " " + jd_text).lower()
+        if source_texts is not None:
+             combined = " ".join(source_texts) if isinstance(source_texts, (list, tuple)) else str(source_texts)
+        else:
+             combined = resume_text + " " + jd_text
+             
+        source_text = combined.lower()
         trainable = [n for n in nodes if n.node_type in ("gap", "skill") and n.days > 0]
 
         if not trainable:
